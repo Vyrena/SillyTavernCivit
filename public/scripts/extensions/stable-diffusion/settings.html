@@ -44,6 +44,7 @@
                 <option value="aimlapi">AI/ML API</option>
                 <option value="bfl">BFL (Black Forest Labs)</option>
                 <option value="chutes">Chutes</option>
+                <option value="civitai">Civitai</option>
                 <option value="workersai">Cloudflare Workers AI</option>
                 <option value="comfy">ComfyUI</option>
                 <option value="drawthings">DrawThings HTTP API</option>
@@ -118,6 +119,57 @@
             </div>
             <div data-sd-source="chutes">
                 <i data-i18n="Hint: Save an API key in the Chutes (Chat Completion) API settings to use it here.">Hint: Save an API key in the Chutes (Chat Completion) API settings to use it here.</i>
+            </div>
+            <div data-sd-source="civitai">
+                <div class="flex-container flexnowrap alignItemsBaseline marginBot5">
+                    <a href="https://civitai.com/user/account" target="_blank" rel="noopener noreferrer">
+                        <strong>Civitai API token</strong>
+                        <i class="fa-solid fa-share-from-square"></i>
+                    </a>
+                    <span class="expander"></span>
+                    <div id="sd_civitai_key" class="menu_button menu_button_icon manage-api-keys" data-key="api_key_civitai">
+                        <i class="fa-fw fa-solid fa-key"></i>
+                        <span data-i18n="Click to set">Click to set</span>
+                    </div>
+                </div>
+
+                <label for="sd_civitai_search">Search runnable checkpoints</label>
+                <div class="flex-container flexnowrap">
+                    <input id="sd_civitai_search" type="text" class="text_pole" placeholder="Model name (blank shows popular models)" />
+                    <div id="sd_civitai_search_button" class="menu_button menu_button_icon" title="Search Civitai">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                        <span>Search</span>
+                    </div>
+                </div>
+
+                <label for="sd_civitai_model">Model reference</label>
+                <div class="flex-container flexnowrap">
+                    <input id="sd_civitai_model" type="text" class="text_pole" placeholder="Civitai URL, model version ID, or AIR" />
+                    <div id="sd_civitai_resolve" class="menu_button menu_button_icon" title="Validate and resolve model">
+                        <i class="fa-solid fa-check"></i>
+                        <span>Resolve</span>
+                    </div>
+                </div>
+                <small id="sd_civitai_model_status">Select a search result below or paste any runnable SD1/SDXL checkpoint.</small>
+
+                <label for="sd_civitai_loras" class="marginTop5">LoRAs (optional)</label>
+                <textarea id="sd_civitai_loras" class="text_pole textarea_compact" rows="3" placeholder="One version ID, URL, or AIR per line&#10;Example: 123456 = 0.8"></textarea>
+                <small>Use <code>reference = strength</code>. Up to 10 compatible LoRAs are supported.</small>
+
+                <label for="sd_civitai_allow_mature" class="checkbox_label marginTop5">
+                    <input id="sd_civitai_allow_mature" type="checkbox" />
+                    <span>Allow mature content</span>
+                    <small class="toggle-description">Uses yellow Buzz</small>
+                </label>
+
+                <div class="flex-container alignItemsCenter marginTop5">
+                    <div id="sd_civitai_preview" class="menu_button menu_button_icon">
+                        <i class="fa-solid fa-coins"></i>
+                        <span>Preview generation cost</span>
+                    </div>
+                    <small id="sd_civitai_cost" class="flex1"></small>
+                </div>
+                <small>Cost preview validates the workflow without generating an image or spending Buzz.</small>
             </div>
             <div data-sd-source="electronhub">
                 <i data-i18n="Hint: Save an API key in the Electron Hub (Chat Completion) API settings to use it here.">Hint: Save an API key in the Electron Hub (Chat Completion) API settings to use it here.</i>
@@ -436,12 +488,12 @@
             </div>
 
             <div class="flex-container">
-                <div class="flex1" data-sd-source="extras,horde,auto,drawthings,novel,vlad,comfy,sdcpp">
+                <div class="flex1" data-sd-source="extras,horde,auto,drawthings,novel,vlad,comfy,sdcpp,civitai">
                     <label for="sd_sampler" data-i18n="Sampling method">Sampling method</label>
                     <select id="sd_sampler" class="text_pole"></select>
                 </div>
 
-                <div class="flex1" data-sd-source="comfy,auto,novel,sdcpp">
+                <div class="flex1" data-sd-source="comfy,auto,novel,sdcpp,civitai">
                     <label for="sd_scheduler" data-i18n="Scheduler">Scheduler</label>
                     <select id="sd_scheduler" class="text_pole"></select>
                 </div>
@@ -524,7 +576,7 @@
                     <input class="neo-range-input" type="number" id="sd_hr_second_pass_steps_value" data-for="sd_hr_second_pass_steps" max="{{hr_second_pass_steps_max}}" step="{{hr_second_pass_steps_step}}" value="{{hr_second_pass_steps}}" >
                 </div>
 
-                <div class="alignitemscenter flex-container flexFlowColumn flexGrow flexShrink gap0 flexBasis48p" data-sd-source="auto,vlad,comfy,horde,drawthings,extras,sdcpp">
+                <div class="alignitemscenter flex-container flexFlowColumn flexGrow flexShrink gap0 flexBasis48p" data-sd-source="auto,vlad,comfy,horde,drawthings,extras,sdcpp,civitai">
                     <small>
                         <span data-i18n="CLIP Skip">CLIP Skip</span>
                     </small>
@@ -578,7 +630,7 @@
                 </label>
             </div>
 
-            <div data-sd-source="novel,togetherai,pollinations,comfy,drawthings,vlad,auto,horde,extras,stability,bfl,sdcpp" class="marginTop5">
+            <div data-sd-source="novel,togetherai,pollinations,comfy,drawthings,vlad,auto,horde,extras,stability,bfl,sdcpp,civitai" class="marginTop5">
                 <label for="sd_seed">
                     <span data-i18n="Seed">Seed</span>
                     <small data-i18n="(-1 for random)">(-1 for random)</small>

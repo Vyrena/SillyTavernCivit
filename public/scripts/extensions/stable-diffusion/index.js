@@ -86,6 +86,7 @@ const sources = {
     stability: 'stability',
     huggingface: 'huggingface',
     chutes: 'chutes',
+    civitai: 'civitai',
     electronhub: 'electronhub',
     nanogpt: 'nanogpt',
     bfl: 'bfl',
@@ -96,6 +97,14 @@ const sources = {
     openrouter: 'openrouter',
     workersai: 'workersai',
 };
+const civitaiSamplers = [
+    'euler', 'heun', 'dpm2', 'dpm++2s_a', 'dpm++2m', 'dpm++2mv2', 'ipndm', 'ipndm_v',
+    'ddim_trailing', 'euler_a', 'lcm', 'res_multistep', 'res_2s', 'tcd', 'er_sde',
+];
+const civitaiSchedulers = [
+    'discrete', 'simple', 'karras', 'exponential', 'ays', 'bong_tangent', 'gits', 'sgm_uniform',
+    'smoothstep', 'kl_optimal', 'lcm',
+];
 const comfyTypes = {
     standard: 'standard',
     runpod_serverless: 'runpod_serverless',
@@ -356,6 +365,12 @@ const defaultSettings = {
     // BFL API settings
     bfl_upsampling: false,
 
+    // Civitai settings
+    civitai_model: '',
+    civitai_search: '',
+    civitai_loras: '',
+    civitai_allow_mature: false,
+
     // Google settings
     google_api: 'makersuite',
     google_enhance: true,
@@ -557,6 +572,10 @@ async function loadSettings() {
     $('#sd_huggingface_model_id').val(extension_settings.sd.huggingface_model_id);
     $('#sd_function_tool').prop('checked', extension_settings.sd.function_tool);
     $('#sd_bfl_upsampling').prop('checked', extension_settings.sd.bfl_upsampling);
+    $('#sd_civitai_model').val(extension_settings.sd.civitai_model);
+    $('#sd_civitai_search').val(extension_settings.sd.civitai_search);
+    $('#sd_civitai_loras').val(extension_settings.sd.civitai_loras);
+    $('#sd_civitai_allow_mature').prop('checked', extension_settings.sd.civitai_allow_mature);
     $('#sd_google_api').val(extension_settings.sd.google_api);
     $('#sd_google_enhance').prop('checked', extension_settings.sd.google_enhance);
     $('#sd_google_duration').val(extension_settings.sd.google_duration);
@@ -1327,6 +1346,90 @@ function onBflUpsamplingInput() {
     saveSettingsDebounced();
 }
 
+function onCivitaiModelInput() {
+    const model = String($('#sd_civitai_model').val() || '').trim();
+    extension_settings.sd.civitai_model = model;
+
+    if (extension_settings.sd.source === sources.civitai) {
+        extension_settings.sd.model = model;
+        if (model && $(`#sd_model option[value="${CSS.escape(model)}"]`).length === 0) {
+            $('#sd_model').prepend(new Option(model, model, true, true));
+        } else {
+            $('#sd_model').val(model);
+        }
+    }
+
+    $('#sd_civitai_model_status').empty();
+    saveSettingsDebounced();
+}
+
+function onCivitaiSearchInput() {
+    extension_settings.sd.civitai_search = String($('#sd_civitai_search').val() || '').trim();
+    saveSettingsDebounced();
+}
+
+function onCivitaiLorasInput() {
+    extension_settings.sd.civitai_loras = String($('#sd_civitai_loras').val() || '');
+    saveSettingsDebounced();
+}
+
+function onCivitaiMatureInput() {
+    extension_settings.sd.civitai_allow_mature = !!$('#sd_civitai_allow_mature').prop('checked');
+    saveSettingsDebounced();
+}
+
+async function onCivitaiSearchClick() {
+    onCivitaiSearchInput();
+    await loadModels();
+}
+
+async function onCivitaiResolveClick() {
+    try {
+        const result = await fetch('/api/sd/civitai/resolve', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ model: extension_settings.sd.civitai_model }),
+        });
+        if (!result.ok) {
+            throw new Error(await result.text());
+        }
+
+        const resource = await result.json();
+        extension_settings.sd.civitai_model = resource.air;
+        extension_settings.sd.model = resource.air;
+        $('#sd_civitai_model').val(resource.air);
+        $('#sd_civitai_model_status').text(`${resource.name} (${resource.ecosystem.toUpperCase()})`);
+        await loadModels();
+        saveSettingsDebounced();
+        toastr.success('Civitai model resolved.');
+    } catch (error) {
+        $('#sd_civitai_model_status').text(String(error));
+        toastr.error(`Could not resolve Civitai model: ${error.message}`);
+    }
+}
+
+async function onCivitaiPreviewClick() {
+    try {
+        const result = await fetch('/api/sd/civitai/preview', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(getCivitaiGenerationBody('SillyTavern Civitai cost preview', '')),
+        });
+        if (!result.ok) {
+            throw new Error(await result.text());
+        }
+
+        const data = await result.json();
+        const total = Number(data?.cost?.total);
+        const cost = Number.isFinite(total) ? `${total} Buzz` : 'Cost unavailable';
+        $('#sd_civitai_cost').text(cost);
+        toastr.info(cost, 'Civitai cost preview');
+    } catch (error) {
+        $('#sd_civitai_cost').text('Preview failed');
+        toastr.error(`Could not preview Civitai cost: ${error.message}`);
+    }
+}
+
 function onStabilityStylePresetChange() {
     extension_settings.sd.stability_style_preset = String($('#sd_stability_style_preset').val());
     saveSettingsDebounced();
@@ -1487,6 +1590,13 @@ async function validateComfyRunPodUrl() {
 async function onModelChange() {
     const selectedModel = $('#sd_model').find(':selected');
     extension_settings.sd.model = selectedModel.val();
+
+    if (extension_settings.sd.source === sources.civitai) {
+        extension_settings.sd.civitai_model = String(extension_settings.sd.model || '');
+        $('#sd_civitai_model').val(extension_settings.sd.civitai_model);
+        $('#sd_civitai_model_status').empty();
+    }
+
     saveSettingsDebounced();
 
     if (extension_settings.sd.model && extension_settings.sd.source === sources.electronhub) {
@@ -1716,6 +1826,12 @@ async function loadSamplers() {
         case sources.huggingface:
             samplers = ['N/A'];
             break;
+        case sources.civitai:
+            samplers = civitaiSamplers;
+            if (!samplers.includes(extension_settings.sd.sampler)) {
+                extension_settings.sd.sampler = samplers[0];
+            }
+            break;
         case sources.chutes:
             samplers = ['N/A'];
             break;
@@ -1840,6 +1956,43 @@ async function loadSdcppModels() {
     }
 
     return [{ value: '', text: 'N/A' }];
+}
+
+async function loadCivitaiModels() {
+    $('#sd_civitai_key').toggleClass('success', !!secret_state[SECRET_KEYS.CIVITAI]);
+
+    const currentModel = String(extension_settings.sd.civitai_model || '').trim();
+    if (currentModel && !extension_settings.sd.model) {
+        extension_settings.sd.model = currentModel;
+    }
+    const currentOption = currentModel ? [{ value: currentModel, text: currentModel }] : [];
+    if (!secret_state[SECRET_KEYS.CIVITAI]) {
+        return currentOption;
+    }
+
+    try {
+        const result = await fetch('/api/sd/civitai/models', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                query: extension_settings.sd.civitai_search,
+                allow_mature: extension_settings.sd.civitai_allow_mature,
+            }),
+        });
+        if (!result.ok) {
+            throw new Error(await result.text());
+        }
+
+        const data = await result.json();
+        const models = Array.isArray(data) ? data : [];
+        if (currentModel && !models.some(model => model.value === currentModel)) {
+            models.unshift(currentOption[0]);
+        }
+        return models;
+    } catch (error) {
+        console.error('Failed to load Civitai models:', error);
+        return currentOption;
+    }
 }
 
 async function loadSdcppSamplers() {
@@ -1968,6 +2121,9 @@ async function loadModels() {
             break;
         case sources.huggingface:
             models = [{ value: '', text: t`<Enter Model ID above>` }];
+            break;
+        case sources.civitai:
+            models = await loadCivitaiModels();
             break;
         case sources.chutes:
             models = await loadChutesModels();
@@ -2613,6 +2769,12 @@ async function loadSchedulers() {
         case sources.huggingface:
             schedulers = ['N/A'];
             break;
+        case sources.civitai:
+            schedulers = civitaiSchedulers;
+            if (!schedulers.includes(extension_settings.sd.scheduler)) {
+                extension_settings.sd.scheduler = schedulers[0];
+            }
+            break;
         case sources.chutes:
             schedulers = ['N/A'];
             break;
@@ -2734,6 +2896,9 @@ async function loadVaes() {
             vaes = ['N/A'];
             break;
         case sources.huggingface:
+            vaes = ['N/A'];
+            break;
+        case sources.civitai:
             vaes = ['N/A'];
             break;
         case sources.chutes:
@@ -3388,6 +3553,9 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
             case sources.huggingface:
                 result = await generateHuggingFaceImage(prefixedPrompt, signal);
                 break;
+            case sources.civitai:
+                result = await generateCivitaiImage(prefixedPrompt, negativePrompt, signal);
+                break;
             case sources.chutes:
                 result = await generateChutesImage(prefixedPrompt, negativePrompt, signal);
                 break;
@@ -3448,6 +3616,123 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
         ? await callback(prompt, base64Image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, result.format)
         : await sendMessage(prompt, base64Image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, result.format);
     return base64Image;
+}
+
+function getCivitaiGenerationBody(prompt, negativePrompt) {
+    return {
+        prompt,
+        negative_prompt: negativePrompt,
+        model: extension_settings.sd.civitai_model || extension_settings.sd.model,
+        loras: extension_settings.sd.civitai_loras,
+        allow_mature: extension_settings.sd.civitai_allow_mature,
+        width: extension_settings.sd.width,
+        height: extension_settings.sd.height,
+        steps: extension_settings.sd.steps,
+        cfg_scale: extension_settings.sd.scale,
+        sampler: extension_settings.sd.sampler,
+        scheduler: extension_settings.sd.scheduler,
+        clip_skip: extension_settings.sd.clip_skip,
+        seed: extension_settings.sd.seed >= 0 ? extension_settings.sd.seed : undefined,
+    };
+}
+
+/**
+ * Generates an image using Civitai's Orchestration API.
+ * @param {string} prompt Positive prompt.
+ * @param {string} negativePrompt Negative prompt.
+ * @param {AbortSignal} signal Abort signal used to cancel the remote workflow.
+ * @returns {Promise<{format: string, data: string}>}
+ */
+async function generateCivitaiImage(prompt, negativePrompt, signal) {
+    const submitResult = await fetch('/api/sd/civitai/generate', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        signal,
+        body: JSON.stringify(getCivitaiGenerationBody(prompt, negativePrompt)),
+    });
+    if (!submitResult.ok) {
+        throw new Error(await submitResult.text());
+    }
+
+    let workflow = await submitResult.json();
+    const workflowId = String(workflow?.id || '');
+    if (!workflowId) {
+        throw new Error('Civitai did not return a workflow ID.');
+    }
+
+    const cancelRemoteWorkflow = () => {
+        fetch('/api/sd/civitai/cancel', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ id: workflowId }),
+        }).catch(error => console.warn('Could not cancel Civitai workflow:', error));
+    };
+    signal?.addEventListener('abort', cancelRemoteWorkflow, { once: true });
+
+    const pollDelays = [2000, 5000, 10000, 15000, 30000];
+    let pollIndex = 0;
+
+    try {
+        while (true) {
+            if (signal?.aborted) {
+                throw new Error('Civitai image generation was canceled.');
+            }
+
+            if (workflow?.terminal && workflow.status !== 'succeeded') {
+                throw new Error(workflow.error || `Civitai workflow ${workflow.status}.`);
+            }
+
+            if (workflow.status !== 'succeeded') {
+                await waitForCivitaiPoll(pollDelays[Math.min(pollIndex++, pollDelays.length - 1)], signal);
+            }
+
+            if (signal?.aborted) {
+                throw new Error('Civitai image generation was canceled.');
+            }
+
+            const statusResult = await fetch('/api/sd/civitai/status', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                signal,
+                body: JSON.stringify({ id: workflowId }),
+            });
+            if (!statusResult.ok) {
+                throw new Error(await statusResult.text());
+            }
+
+            workflow = await statusResult.json();
+            if (workflow.status === 'succeeded' && workflow.image) {
+                const total = Number(workflow?.cost?.total);
+                if (Number.isFinite(total)) {
+                    $('#sd_civitai_cost').text(`${total} Buzz`);
+                }
+                return { format: workflow.format || 'png', data: workflow.image };
+            }
+        }
+    } finally {
+        signal?.removeEventListener('abort', cancelRemoteWorkflow);
+    }
+}
+
+function waitForCivitaiPoll(milliseconds, signal) {
+    if (!signal) {
+        return delay(milliseconds);
+    }
+    if (signal.aborted) {
+        return Promise.reject(new Error('Civitai image generation was canceled.'));
+    }
+
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, milliseconds);
+        const onAbort = () => {
+            clearTimeout(timeout);
+            reject(new Error('Civitai image generation was canceled.'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+    });
 }
 
 /**
@@ -5111,6 +5396,8 @@ function isValidState() {
             return secret_state[SECRET_KEYS.STABILITY];
         case sources.huggingface:
             return secret_state[SECRET_KEYS.HUGGINGFACE];
+        case sources.civitai:
+            return secret_state[SECRET_KEYS.CIVITAI] && !!extension_settings.sd.civitai_model;
         case sources.chutes:
             return secret_state[SECRET_KEYS.CHUTES];
         case sources.electronhub:
@@ -5880,6 +6167,13 @@ export async function init() {
     $('#sd_huggingface_model_id').on('input', onHFModelInput);
     $('#sd_function_tool').on('input', onFunctionToolInput);
     $('#sd_bfl_upsampling').on('input', onBflUpsamplingInput);
+    $('#sd_civitai_model').on('change', onCivitaiModelInput);
+    $('#sd_civitai_search').on('input', onCivitaiSearchInput);
+    $('#sd_civitai_search_button').on('click', onCivitaiSearchClick);
+    $('#sd_civitai_resolve').on('click', onCivitaiResolveClick);
+    $('#sd_civitai_loras').on('input', onCivitaiLorasInput);
+    $('#sd_civitai_allow_mature').on('input', onCivitaiMatureInput);
+    $('#sd_civitai_preview').on('click', onCivitaiPreviewClick);
 
     $('#sd_google_api').on('input', function () {
         extension_settings.sd.google_api = String($(this).val());
@@ -5936,6 +6230,7 @@ export async function init() {
                 [sources.bfl]: SECRET_KEYS.BFL,
                 [sources.falai]: SECRET_KEYS.FALAI,
                 [sources.stability]: SECRET_KEYS.STABILITY,
+                [sources.civitai]: SECRET_KEYS.CIVITAI,
                 [sources.aimlapi]: SECRET_KEYS.AIMLAPI,
                 [sources.comfy]: SECRET_KEYS.COMFY_RUNPOD,
                 [sources.pollinations]: SECRET_KEYS.POLLINATIONS,
