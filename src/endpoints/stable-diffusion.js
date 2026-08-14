@@ -13,6 +13,7 @@ import { delay, getBasicAuthHeader, isValidUrl, tryParse } from '../util.js';
 import { readSecret, SECRET_KEYS } from './secrets.js';
 import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { AIMLAPI_HEADERS } from '../constants.js';
+import { router as civitai } from './civitai.js';
 
 /**
  * Gets the comfy workflows.
@@ -2198,6 +2199,7 @@ router.use('/pollinations', pollinations);
 router.use('/stability', stability);
 router.use('/huggingface', huggingface);
 router.use('/chutes', chutes);
+router.use('/civitai', civitai);
 router.use('/electronhub', electronhub);
 router.use('/nanogpt', nanogpt);
 router.use('/bfl', bfl);
