@@ -35,6 +35,52 @@ export const CIVITAI_SCHEDULES = [
     'lcm',
 ];
 
+export const CIVITAI_BUILTIN_MODELS = [
+    {
+        value: 'krea2:raw',
+        text: 'Krea 2 Raw — community LoRAs',
+        name: 'Krea 2 Raw',
+        ecosystem: 'krea2',
+        variant: 'raw',
+        baseModel: 'Krea 2',
+        builtin: true,
+    },
+    {
+        value: 'krea2:turbo',
+        text: 'Krea 2 Turbo — community LoRAs',
+        name: 'Krea 2 Turbo',
+        ecosystem: 'krea2',
+        variant: 'turbo',
+        baseModel: 'Krea 2',
+        builtin: true,
+    },
+];
+
+const CIVITAI_COMFY_SAMPLERS = new Set([
+    'euler', 'euler_ancestral', 'heun', 'dpm_2', 'dpmpp_2s_ancestral', 'dpmpp_2m',
+    'ipndm', 'ipndm_v', 'ddim', 'lcm', 'res_multistep', 'er_sde',
+]);
+const CIVITAI_COMFY_SAMPLER_ALIASES = {
+    euler_a: 'euler_ancestral',
+    dpm2: 'dpm_2',
+    'dpm++2s_a': 'dpmpp_2s_ancestral',
+    'dpm++2m': 'dpmpp_2m',
+    'dpm++2mv2': 'dpmpp_2m',
+    ddim_trailing: 'ddim',
+};
+const CIVITAI_COMFY_SCHEDULES = new Set(['normal', 'karras', 'exponential', 'sgm_uniform', 'simple']);
+const CIVITAI_COMFY_SCHEDULE_ALIASES = { discrete: 'normal' };
+
+/**
+ * Resolve one of the integration's managed model references.
+ * @param {unknown} value Model reference.
+ * @returns {(typeof CIVITAI_BUILTIN_MODELS)[number]|null}
+ */
+export function getCivitaiBuiltinModel(value) {
+    const reference = String(value ?? '').trim().toLowerCase();
+    return CIVITAI_BUILTIN_MODELS.find(model => model.value === reference) ?? null;
+}
+
 /**
  * Parse a model reference accepted by the Civitai UI.
  * @param {unknown} value Model version ID, model URL, model-version URL, or AIR.
@@ -230,7 +276,7 @@ export function flattenCivitaiLoras(payload) {
 /**
  * Build a Civitai image-generation workflow.
  * @param {object} params Image-generation parameters.
- * @param {string} params.model Canonical checkpoint AIR.
+ * @param {string} params.model Canonical checkpoint AIR or managed model reference.
  * @param {string} params.ecosystem Civitai ecosystem.
  * @param {string} params.prompt Positive prompt.
  * @param {string} [params.negativePrompt] Negative prompt.
@@ -243,6 +289,7 @@ export function flattenCivitaiLoras(payload) {
  * @param {number} [params.clipSkip] CLIP skip.
  * @param {number} [params.seed] Seed.
  * @param {Record<string, number>} [params.loras] LoRA AIRs and strengths.
+ * @param {'raw'|'turbo'} [params.kreaVariant] Krea 2 generation variant for a custom diffusion model.
  * @param {number} [params.quantity] Number of images to generate.
  * @param {string} [params.sourceImage] Data URL, Base64 string, or public URL for img2img.
  * @param {number} [params.strength] Img2img denoising strength.
@@ -254,15 +301,19 @@ export function flattenCivitaiLoras(payload) {
  */
 export function buildCivitaiWorkflow(params) {
     const ecosystem = String(params.ecosystem || '').toLowerCase();
-    if (!['sd1', 'sdxl'].includes(ecosystem)) {
-        throw new Error(`Unsupported Civitai ecosystem "${ecosystem || 'unknown'}". This integration currently supports SD1 and SDXL checkpoints.`);
+    if (!['sd1', 'sdxl', 'krea2'].includes(ecosystem)) {
+        throw new Error(`Unsupported Civitai ecosystem "${ecosystem || 'unknown'}". This integration currently supports SD1, SDXL, and Krea 2.`);
     }
 
+    const builtinModel = getCivitaiBuiltinModel(params.model);
     const modelAir = parseCivitaiAir(params.model);
-    if (!modelAir || modelAir.type !== 'checkpoint') {
+    if (!builtinModel && (!modelAir || modelAir.type !== 'checkpoint')) {
         throw new Error('The selected Civitai model is not a checkpoint AIR.');
     }
-    if (modelAir.ecosystem !== ecosystem) {
+    if (builtinModel && builtinModel.ecosystem !== ecosystem) {
+        throw new Error(`The selected managed model belongs to ${builtinModel.ecosystem}, not ${ecosystem}.`);
+    }
+    if (modelAir && modelAir.ecosystem !== ecosystem) {
         throw new Error(`The selected checkpoint belongs to ${modelAir.ecosystem}, not ${ecosystem}.`);
     }
 
@@ -272,32 +323,57 @@ export function buildCivitaiWorkflow(params) {
         throw new Error('Civitai image width and height must be divisible by 16.');
     }
 
+    const sourceImage = String(params.sourceImage || '').trim();
+    const isKrea2 = ecosystem === 'krea2';
+    const maximumQuantity = isKrea2 && sourceImage ? 4 : 12;
     const input = {
-        engine: 'sdcpp',
-        ecosystem,
-        operation: 'createImage',
-        model: params.model,
         prompt: String(params.prompt ?? '').slice(0, 10000),
         negativePrompt: String(params.negativePrompt ?? '').slice(0, 10000),
         width,
         height,
         cfgScale: validateNumber(params.cfgScale, 'CFG scale', 0, 30),
         steps: validateInteger(params.steps, 'Sampling steps', 1, 150),
-        quantity: validateInteger(params.quantity ?? 1, 'Quantity', 1, 12),
+        quantity: validateInteger(params.quantity ?? 1, 'Quantity', 1, maximumQuantity),
     };
 
-    if (params.sampler && params.sampler !== 'N/A') {
-        if (!CIVITAI_SAMPLERS.includes(params.sampler)) {
-            throw new Error(`Unsupported Civitai sampler "${params.sampler}".`);
+    if (isKrea2) {
+        const variant = builtinModel?.variant || String(params.kreaVariant || 'raw').toLowerCase();
+        if (!['raw', 'turbo'].includes(variant)) {
+            throw new Error(`Unsupported Krea 2 variant "${variant}".`);
         }
-        input.sampleMethod = params.sampler;
-    }
 
-    if (params.scheduler && params.scheduler !== 'N/A') {
-        if (!CIVITAI_SCHEDULES.includes(params.scheduler)) {
-            throw new Error(`Unsupported Civitai schedule "${params.scheduler}".`);
+        input.engine = 'comfy';
+        input.ecosystem = 'krea2';
+        input.operation = 'createImage';
+        input.model = variant;
+        if (modelAir) {
+            input.diffusionModel = modelAir.air;
         }
-        input.schedule = params.scheduler;
+        if (params.sampler && params.sampler !== 'N/A') {
+            input.sampler = mapCivitaiComfySampler(params.sampler);
+        }
+        if (params.scheduler && params.scheduler !== 'N/A') {
+            input.scheduler = mapCivitaiComfySchedule(params.scheduler);
+        }
+    } else {
+        input.engine = 'sdcpp';
+        input.ecosystem = ecosystem;
+        input.operation = 'createImage';
+        input.model = modelAir.air;
+
+        if (params.sampler && params.sampler !== 'N/A') {
+            if (!CIVITAI_SAMPLERS.includes(params.sampler)) {
+                throw new Error(`Unsupported Civitai sampler "${params.sampler}".`);
+            }
+            input.sampleMethod = params.sampler;
+        }
+
+        if (params.scheduler && params.scheduler !== 'N/A') {
+            if (!CIVITAI_SCHEDULES.includes(params.scheduler)) {
+                throw new Error(`Unsupported Civitai schedule "${params.scheduler}".`);
+            }
+            input.schedule = params.scheduler;
+        }
     }
 
     if (Number.isSafeInteger(params.seed) && params.seed >= 0) {
@@ -315,7 +391,6 @@ export function buildCivitaiWorkflow(params) {
     const imageStep = { $type: 'imageGen', name: 'generate', input };
     const steps = [];
 
-    const sourceImage = String(params.sourceImage || '').trim();
     if (sourceImage) {
         steps.push({
             $type: 'convertImage',
@@ -325,9 +400,16 @@ export function buildCivitaiWorkflow(params) {
                 output: { format: 'png', hideMetadata: true },
             },
         });
-        input.operation = 'createVariant';
-        input.image = { $ref: 'source-image', path: 'output.blob.url' };
-        input.strength = validateNumber(params.strength ?? 0.7, 'Image-to-image strength', 0, 1);
+        const sourceReference = { $ref: 'source-image', path: 'output.blob.url' };
+        if (isKrea2) {
+            input.operation = 'editImage';
+            input.model = 'edit';
+            input.images = [sourceReference];
+        } else {
+            input.operation = 'createVariant';
+            input.image = sourceReference;
+            input.strength = validateNumber(params.strength ?? 0.7, 'Image-to-image strength', 0, 1);
+        }
     }
 
     if (params.enhancePrompt) {
@@ -474,6 +556,24 @@ export function getCivitaiWorkflowError(workflow) {
     }
 
     return messages.find(Boolean) || `Civitai workflow ${String(workflow?.status || 'failed')}.`;
+}
+
+function mapCivitaiComfySampler(value) {
+    const requested = String(value || '').trim();
+    const sampler = CIVITAI_COMFY_SAMPLER_ALIASES[requested] || requested;
+    if (!CIVITAI_COMFY_SAMPLERS.has(sampler)) {
+        throw new Error(`Krea 2 does not support the Civitai sampler "${requested}". Try Euler, Euler A, DPM++ 2M, or LCM.`);
+    }
+    return sampler;
+}
+
+function mapCivitaiComfySchedule(value) {
+    const requested = String(value || '').trim();
+    const schedule = CIVITAI_COMFY_SCHEDULE_ALIASES[requested] || requested;
+    if (!CIVITAI_COMFY_SCHEDULES.has(schedule)) {
+        throw new Error(`Krea 2 does not support the Civitai schedule "${requested}". Try Discrete, Simple, Karras, Exponential, or SGM Uniform.`);
+    }
+    return schedule;
 }
 
 function validateInteger(value, name, minimum, maximum) {

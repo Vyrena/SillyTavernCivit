@@ -7,10 +7,12 @@ import mime from 'mime-types';
 
 import {
     buildCivitaiWorkflow,
+    CIVITAI_BUILTIN_MODELS,
     CIVITAI_TERMINAL_STATUSES,
     flattenCivitaiLoras,
     flattenCivitaiModels,
     getCivitaiPromptEnhancement,
+    getCivitaiBuiltinModel,
     getCivitaiWorkflowError,
     getCivitaiWorkflowImages,
     parseCivitaiAir,
@@ -42,7 +44,7 @@ router.post('/models', async (request, response) => {
     try {
         const token = getCivitaiToken(request);
         const data = await searchCivitaiResources(token, request.body, 'Checkpoint');
-        return response.send(flattenCivitaiModels(data));
+        return response.send([...CIVITAI_BUILTIN_MODELS, ...flattenCivitaiModels(data)]);
     } catch (error) {
         return sendCivitaiError(response, error);
     }
@@ -270,6 +272,7 @@ async function prepareWorkflow(token, body, purpose) {
         clipSkip: Number(body?.clip_skip),
         seed,
         quantity,
+        kreaVariant: model.variant || String(body?.krea_variant || 'raw'),
         sourceImage,
         strength: Number(body?.source_strength ?? 0.7),
         postProcess,
@@ -280,6 +283,9 @@ async function prepareWorkflow(token, body, purpose) {
     });
 
     const warnings = [...model.warnings, ...resolvedLoras.flatMap(resource => resource.warnings)];
+    if (model.ecosystem === 'krea2' && sourceImage) {
+        warnings.push('Krea 2 uses instruction-based Edit mode for source images; the strength slider is not used and Edit supports up to 4 outputs.');
+    }
     workflow.metadata.generation = {
         model: pickResourceMetadata(model),
         loras: resolvedLoras.map(resource => ({ ...pickResourceMetadata(resource), strength: resource.strength })),
@@ -294,9 +300,16 @@ async function prepareWorkflow(token, body, purpose) {
         clipSkip: Number(body?.clip_skip),
         seed,
         quantity,
+        kreaVariant: model.variant || String(body?.krea_variant || 'raw'),
         promptMode: body?.enhance_prompt === true ? 'automatic' : 'off',
         allowMature: body?.allow_mature === true,
-        source: sourceImage ? { enabled: true, strength: Number(body?.source_strength ?? 0.7) } : { enabled: false },
+        source: sourceImage
+            ? {
+                enabled: true,
+                mode: model.ecosystem === 'krea2' ? 'edit' : 'variant',
+                strength: model.ecosystem === 'krea2' ? null : Number(body?.source_strength ?? 0.7),
+            }
+            : { enabled: false },
         postProcess,
         warnings,
     };
@@ -305,6 +318,33 @@ async function prepareWorkflow(token, body, purpose) {
 }
 
 async function resolveCivitaiResource(token, reference, expectedType) {
+    const builtin = getCivitaiBuiltinModel(reference);
+    if (builtin) {
+        if (expectedType !== 'checkpoint') {
+            throw new CivitaiApiError(`Expected a Civitai ${expectedType}, but ${builtin.name} is a managed generation model.`, 400);
+        }
+        return {
+            air: builtin.value,
+            reference: builtin.value,
+            name: builtin.name,
+            ecosystem: builtin.ecosystem,
+            type: 'builtin',
+            modelId: null,
+            versionId: null,
+            baseModel: builtin.baseModel,
+            availability: 'Managed',
+            canGenerate: true,
+            checkPermission: false,
+            earlyAccessEndsAt: null,
+            freeTrialLimit: null,
+            additionalResourceCharge: false,
+            sfwOnly: false,
+            variant: builtin.variant,
+            builtin: true,
+            warnings: [],
+        };
+    }
+
     const parsed = parseCivitaiModelReference(reference);
     let versionId = parsed.versionId;
 
@@ -397,8 +437,8 @@ function validateResolvedResource(resource, expectedType) {
 }
 
 function ensureSupportedEcosystem(resource) {
-    if (!['sd1', 'sdxl'].includes(resource.ecosystem)) {
-        throw new CivitaiApiError(`Civitai model ${resource.name} uses the unsupported ${resource.ecosystem} ecosystem. Select an SD1 or SDXL checkpoint.`, 400);
+    if (!['sd1', 'sdxl', 'krea2'].includes(resource.ecosystem)) {
+        throw new CivitaiApiError(`Civitai model ${resource.name} uses the unsupported ${resource.ecosystem} ecosystem. Select an SD1, SDXL, or Krea 2 model.`, 400);
     }
 }
 
@@ -412,6 +452,9 @@ function pickResourceMetadata(resource) {
         versionId: resource.versionId,
         baseModel: resource.baseModel,
         availability: resource.availability,
+        reference: resource.reference || resource.air,
+        builtin: resource.builtin === true,
+        variant: resource.variant || null,
         checkPermission: resource.checkPermission,
         earlyAccessEndsAt: resource.earlyAccessEndsAt,
         freeTrialLimit: resource.freeTrialLimit,
