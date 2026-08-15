@@ -15,6 +15,7 @@ import {
     getCivitaiBuiltinModel,
     getCivitaiWorkflowError,
     getCivitaiWorkflowImages,
+    isCivitaiBaseModelType,
     parseCivitaiAir,
     parseCivitaiLoras,
     parseCivitaiModelReference,
@@ -63,7 +64,7 @@ router.post('/loras', async (request, response) => {
 router.post('/resolve', async (request, response) => {
     try {
         const token = getCivitaiToken(request);
-        const resource = await resolveCivitaiResource(token, request.body?.model, 'checkpoint');
+        const resource = await resolveCivitaiResource(token, request.body?.model, 'model');
         return response.send(resource);
     } catch (error) {
         return sendCivitaiError(response, error);
@@ -73,7 +74,7 @@ router.post('/resolve', async (request, response) => {
 router.post('/enhance', async (request, response) => {
     try {
         const token = getCivitaiToken(request);
-        const model = await resolveCivitaiResource(token, request.body?.model, 'checkpoint');
+        const model = await resolveCivitaiResource(token, request.body?.model, 'model');
         ensureSupportedEcosystem(model);
         const prompt = String(request.body?.prompt || '').trim().slice(0, 10000);
         const negativePrompt = String(request.body?.negative_prompt || '').trim().slice(0, 10000);
@@ -162,7 +163,7 @@ router.post('/status', async (request, response) => {
         const downloaded = [];
         let totalBytes = 0;
         for (const image of images) {
-            const result = await downloadCivitaiImage(image);
+            const result = await downloadCivitaiImage(image, token, workflowId);
             totalBytes += result.bytes;
             if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
                 throw new CivitaiApiError('The generated image batch is too large to download safely. Reduce quantity or disable upscaling.', 413);
@@ -225,7 +226,7 @@ async function searchCivitaiResources(token, body, type) {
 }
 
 async function prepareWorkflow(token, body, purpose) {
-    const model = await resolveCivitaiResource(token, body?.model, 'checkpoint');
+    const model = await resolveCivitaiResource(token, body?.model, 'model');
     ensureSupportedEcosystem(model);
 
     const loraEntries = parseCivitaiLoras(body?.loras);
@@ -317,11 +318,11 @@ async function prepareWorkflow(token, body, purpose) {
     return workflow;
 }
 
-async function resolveCivitaiResource(token, reference, expectedType) {
+async function resolveCivitaiResource(token, reference, expectedRole) {
     const builtin = getCivitaiBuiltinModel(reference);
     if (builtin) {
-        if (expectedType !== 'checkpoint') {
-            throw new CivitaiApiError(`Expected a Civitai ${expectedType}, but ${builtin.name} is a managed generation model.`, 400);
+        if (expectedRole !== 'model') {
+            throw new CivitaiApiError(`Expected a Civitai ${expectedRole}, but ${builtin.name} is a managed generation model.`, 400);
         }
         return {
             air: builtin.value,
@@ -377,7 +378,8 @@ async function resolveCivitaiResource(token, reference, expectedType) {
         freeTrialLimit: version?.freeTrialLimit ?? null,
         additionalResourceCharge: version?.additionalResourceCharge === true,
         sfwOnly: version?.sfwOnly === true,
-    }, expectedType);
+    });
+    validateResourceRole(resource, expectedRole);
 
     const pastedAir = parsed.air ? parseCivitaiAir(parsed.air) : null;
     if (pastedAir && (
@@ -417,13 +419,10 @@ async function resolveCivitaiResource(token, reference, expectedType) {
     return { ...resource, warnings };
 }
 
-function validateResolvedResource(resource, expectedType) {
+function validateResolvedResource(resource) {
     const air = parseCivitaiAir(resource.air);
     if (!air) {
         throw new CivitaiApiError('Civitai did not return a canonical AIR for that resource.', 400);
-    }
-    if (air.type !== expectedType) {
-        throw new CivitaiApiError(`Expected a Civitai ${expectedType}, but the resource is a ${air.type}.`, 400);
     }
 
     return {
@@ -434,6 +433,23 @@ function validateResolvedResource(resource, expectedType) {
         modelId: resource.modelId || air.modelId,
         versionId: resource.versionId || air.versionId,
     };
+}
+
+function validateResourceRole(resource, expectedRole) {
+    if (expectedRole === 'model' && isCivitaiBaseModelType(resource.ecosystem, resource.type)) {
+        return;
+    }
+    if (expectedRole === 'lora' && resource.type === 'lora') {
+        return;
+    }
+
+    if (expectedRole === 'model') {
+        const expected = resource.ecosystem === 'krea2'
+            ? 'a Krea 2 diffusionmodel or checkpoint'
+            : 'an SD1/SDXL checkpoint';
+        throw new CivitaiApiError(`Expected ${expected} base model, but the resource is a ${resource.ecosystem}:${resource.type} AIR.`, 400);
+    }
+    throw new CivitaiApiError(`Expected a Civitai ${expectedRole}, but the resource is a ${resource.type}.`, 400);
 }
 
 function ensureSupportedEcosystem(resource) {
@@ -540,24 +556,38 @@ function parseOptionalCost(value) {
     return cost;
 }
 
-async function downloadCivitaiImage(image) {
-    let imageUrl;
+export async function downloadCivitaiImage(image, token, workflowId) {
+    let imageUrl = null;
     try {
         imageUrl = new URL(image.url);
     } catch {
-        throw new CivitaiApiError('Civitai returned an invalid generated-image URL.', 502);
-    }
-    if (imageUrl.protocol !== 'https:') {
-        throw new CivitaiApiError('Civitai returned an insecure generated-image URL.', 502);
+        // A valid blob ID can still recover a malformed or expired output URL.
     }
 
-    const imageResponse = await fetchWithRetry(imageUrl, {
-        method: 'GET',
-        headers: { 'Accept': 'image/*' },
-        size: MAX_IMAGE_BYTES,
-    });
+    let imageResponse = null;
+    let resolvedImageUrl = imageUrl;
+    if (imageUrl?.protocol === 'https:') {
+        imageResponse = await fetchCivitaiImageUrl(imageUrl);
+    }
+
+    if (!imageResponse?.ok && image?.id && token && workflowId) {
+        if (imageResponse) {
+            await imageResponse.arrayBuffer().catch(() => undefined);
+        }
+        const refreshed = await fetchFreshCivitaiBlob(image.id, token, workflowId);
+        imageResponse = refreshed.response;
+        resolvedImageUrl = refreshed.url;
+    }
+
+    if (!imageResponse) {
+        throw new CivitaiApiError('Civitai returned an invalid generated-image URL and no recoverable blob ID.', 502);
+    }
     if (!imageResponse.ok) {
-        throw new CivitaiApiError(`Could not download the generated image from Civitai (${imageResponse.status}).`, 502);
+        const status = [401, 403, 404].includes(imageResponse.status) ? imageResponse.status : 502;
+        const hint = imageResponse.status === 403
+            ? ' The signed URL may have expired, or the API token may not permit this mature output. Resume the saved workflow after correcting access; it will not submit another paid generation.'
+            : '';
+        throw new CivitaiApiError(`Could not download the generated image from Civitai (${imageResponse.status}).${hint}`, status);
     }
 
     const contentType = String(imageResponse.headers.get('content-type') || '').split(';')[0].toLowerCase();
@@ -570,9 +600,49 @@ async function downloadCivitaiImage(image) {
     if (buffer.length > MAX_IMAGE_BYTES) {
         throw new CivitaiApiError('A generated image exceeded the 64 MB download limit.', 413);
     }
-    const pathExtension = path.extname(imageUrl.pathname).slice(1).toLowerCase();
+    const pathExtension = path.extname(resolvedImageUrl?.pathname || '').slice(1).toLowerCase();
     const format = mimeExtension || (SAFE_IMAGE_FORMATS.has(pathExtension) ? pathExtension : 'png');
     return { format, image: buffer.toString('base64'), bytes: buffer.length };
+}
+
+function fetchCivitaiImageUrl(url) {
+    return fetchWithRetry(url, {
+        method: 'GET',
+        headers: { 'Accept': 'image/*' },
+        size: MAX_IMAGE_BYTES,
+    });
+}
+
+async function fetchFreshCivitaiBlob(blobId, token, workflowId) {
+    const params = new URLSearchParams({ workflowId: String(workflowId) });
+    const endpoint = new URL(`${ORCHESTRATION_API}/blobs/${encodeURIComponent(String(blobId))}?${params}`);
+    const response = await civitaiFetch(endpoint, token, {
+        method: 'GET',
+        redirect: 'manual',
+        headers: { 'Accept': 'image/*' },
+    });
+
+    if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location');
+        if (!location) {
+            throw new CivitaiApiError('Civitai refreshed the generated-image blob without returning a download location.', 502);
+        }
+        const refreshedUrl = new URL(location, endpoint);
+        if (refreshedUrl.protocol !== 'https:') {
+            throw new CivitaiApiError('Civitai returned an insecure refreshed-image URL.', 502);
+        }
+        return { response: await fetchCivitaiImageUrl(refreshedUrl), url: refreshedUrl };
+    }
+
+    if (!response.ok) {
+        const error = await makeCivitaiApiError(response);
+        const hint = response.status === 403
+            ? ' The token may not permit this mature output.'
+            : '';
+        throw new CivitaiApiError(`Civitai could not refresh access to the generated-image blob (${response.status}).${hint} ${error.message}`.trim(), response.status);
+    }
+
+    return { response, url: endpoint };
 }
 
 function ensureWorkflowId(workflow) {

@@ -82,6 +82,23 @@ export function getCivitaiBuiltinModel(value) {
 }
 
 /**
+ * Check whether a canonical AIR can act as the selected base model.
+ * Krea 2 publishes split diffusion weights as `diffusionmodel` resources,
+ * while SD1/SDXL use traditional `checkpoint` resources.
+ * @param {string} ecosystem Civitai ecosystem.
+ * @param {string} type AIR resource type.
+ * @returns {boolean}
+ */
+export function isCivitaiBaseModelType(ecosystem, type) {
+    const normalizedEcosystem = String(ecosystem || '').toLowerCase();
+    const normalizedType = String(type || '').toLowerCase();
+    if (normalizedEcosystem === 'krea2') {
+        return ['checkpoint', 'diffusionmodel'].includes(normalizedType);
+    }
+    return ['sd1', 'sdxl'].includes(normalizedEcosystem) && normalizedType === 'checkpoint';
+}
+
+/**
  * Parse a model reference accepted by the Civitai UI.
  * @param {unknown} value Model version ID, model URL, model-version URL, or AIR.
  * @returns {{air?: string, modelId?: number, versionId?: number}}
@@ -276,7 +293,7 @@ export function flattenCivitaiLoras(payload) {
 /**
  * Build a Civitai image-generation workflow.
  * @param {object} params Image-generation parameters.
- * @param {string} params.model Canonical checkpoint AIR or managed model reference.
+ * @param {string} params.model Canonical base-model AIR or managed model reference.
  * @param {string} params.ecosystem Civitai ecosystem.
  * @param {string} params.prompt Positive prompt.
  * @param {string} [params.negativePrompt] Negative prompt.
@@ -307,8 +324,8 @@ export function buildCivitaiWorkflow(params) {
 
     const builtinModel = getCivitaiBuiltinModel(params.model);
     const modelAir = parseCivitaiAir(params.model);
-    if (!builtinModel && (!modelAir || modelAir.type !== 'checkpoint')) {
-        throw new Error('The selected Civitai model is not a checkpoint AIR.');
+    if (!builtinModel && (!modelAir || !isCivitaiBaseModelType(modelAir.ecosystem, modelAir.type))) {
+        throw new Error('The selected Civitai resource is not a supported base-model AIR. Krea 2 accepts diffusionmodel or checkpoint AIRs; SD1/SDXL require checkpoints.');
     }
     if (builtinModel && builtinModel.ecosystem !== ecosystem) {
         throw new Error(`The selected managed model belongs to ${builtinModel.ecosystem}, not ${ecosystem}.`);

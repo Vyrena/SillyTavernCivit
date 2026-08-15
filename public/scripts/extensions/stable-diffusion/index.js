@@ -4323,26 +4323,34 @@ async function pollCivitaiWorkflow(initialWorkflow, signal) {
 async function fetchCivitaiWorkflowStatus(workflowId, signal) {
     let lastError;
     for (let attempt = 0; attempt < 5; attempt++) {
+        let response = null;
         try {
-            const response = await fetch('/api/sd/civitai/status', {
+            response = await fetch('/api/sd/civitai/status', {
                 method: 'POST',
                 headers: getRequestHeaders(),
                 signal,
                 body: JSON.stringify({ id: workflowId }),
             });
-            if (response.ok) {
-                return response.json();
-            }
-            const message = await response.text();
-            if (response.status !== 429 && response.status < 500) {
-                throw new Error(message);
-            }
-            lastError = new Error(message);
         } catch (error) {
             if (signal?.aborted) {
                 throw error;
             }
             lastError = error;
+        }
+
+        if (response?.ok) {
+            return response.json();
+        }
+        if (response) {
+            const message = await response.text();
+            const error = new Error(message || `Civitai status request failed (${response.status}).`);
+            if (response.status !== 429 && response.status < 500) {
+                throw error;
+            }
+            lastError = error;
+        }
+        if (attempt === 4) {
+            break;
         }
 
         const seconds = Math.min(30, 2 ** attempt);
