@@ -29,6 +29,7 @@ import {
 import { selected_group } from '../../group-chats.js';
 import {
     clamp,
+    copyText,
     debounce,
     deepMerge,
     delay,
@@ -54,7 +55,7 @@ import {
 } from '../../slash-commands/SlashCommandArgument.js';
 import { debounce_timeout, IMAGE_OVERSWIPE, MEDIA_DISPLAY, MEDIA_SOURCE, MEDIA_TYPE, SCROLL_BEHAVIOR, SWIPE_DIRECTION, VIDEO_EXTENSIONS } from '../../constants.js';
 import { SlashCommandEnumValue } from '../../slash-commands/SlashCommandEnumValue.js';
-import { callGenericPopup, Popup, POPUP_TYPE } from '../../popup.js';
+import { callGenericPopup, Popup, POPUP_RESULT, POPUP_TYPE } from '../../popup.js';
 import { commonEnumProviders } from '../../slash-commands/SlashCommandCommonEnumsProvider.js';
 import { ToolManager } from '../../tool-calling.js';
 import { macros, MacroCategory } from '../../macros/macro-system.js';
@@ -67,8 +68,15 @@ import { ActionLoaderHandle, loader } from '/scripts/action-loader.js';
 export { MODULE_NAME };
 
 const MODULE_NAME = 'sd';
+const CIVITAI_PENDING_STORAGE_KEY = 'sillytavern-civitai-pending-v1';
 // This is a 1x1 transparent PNG
 const PNG_PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+let civitaiUploadedSourceImage = '';
+let civitaiUploadedSourceName = '';
+let civitaiUploadedSourceUrl = '';
+let civitaiLoraSearchResults = [];
+let civitaiActiveWorkflowId = '';
 
 const sources = {
     extras: 'extras',
@@ -370,6 +378,16 @@ const defaultSettings = {
     civitai_search: '',
     civitai_loras: '',
     civitai_enhance_prompt: false,
+    civitai_prompt_mode: 'off',
+    civitai_model_base: '',
+    civitai_lora_search: '',
+    civitai_lora_metadata: {},
+    civitai_trigger_words: '',
+    civitai_quantity: 1,
+    civitai_max_cost: 0,
+    civitai_source: 'none',
+    civitai_source_strength: 0.7,
+    civitai_post_process: 'none',
     civitai_allow_mature: false,
 
     // Google settings
@@ -476,6 +494,7 @@ function toggleSourceControls() {
 }
 
 async function loadSettings() {
+    const hadCivitaiPromptMode = extension_settings.sd.civitai_prompt_mode !== undefined;
     // Initialize settings
     if (Object.keys(extension_settings.sd).length === 0) {
         Object.assign(extension_settings.sd, defaultSettings);
@@ -486,6 +505,13 @@ async function loadSettings() {
         if (extension_settings.sd[key] === undefined) {
             extension_settings.sd[key] = value;
         }
+    }
+
+    if (!hadCivitaiPromptMode && extension_settings.sd.civitai_enhance_prompt === true) {
+        extension_settings.sd.civitai_prompt_mode = 'automatic';
+    }
+    if (!extension_settings.sd.civitai_lora_metadata || typeof extension_settings.sd.civitai_lora_metadata !== 'object') {
+        extension_settings.sd.civitai_lora_metadata = {};
     }
 
     if (extension_settings.sd.prompts === undefined) {
@@ -576,8 +602,19 @@ async function loadSettings() {
     $('#sd_civitai_model').val(extension_settings.sd.civitai_model);
     $('#sd_civitai_search').val(extension_settings.sd.civitai_search);
     $('#sd_civitai_loras').val(extension_settings.sd.civitai_loras);
-    $('#sd_civitai_enhance_prompt').prop('checked', extension_settings.sd.civitai_enhance_prompt);
+    $('#sd_civitai_lora_search').val(extension_settings.sd.civitai_lora_search);
+    $('#sd_civitai_trigger_words').val(extension_settings.sd.civitai_trigger_words);
+    $('#sd_civitai_prompt_mode').val(extension_settings.sd.civitai_prompt_mode);
+    $('#sd_civitai_quantity').val(extension_settings.sd.civitai_quantity);
+    $('#sd_civitai_max_cost').val(extension_settings.sd.civitai_max_cost);
+    $('#sd_civitai_source').val(extension_settings.sd.civitai_source);
+    $('#sd_civitai_source_strength').val(extension_settings.sd.civitai_source_strength);
+    $('#sd_civitai_source_strength_value').text(Number(extension_settings.sd.civitai_source_strength).toFixed(2));
+    $('#sd_civitai_source_upload').toggle(extension_settings.sd.civitai_source === 'upload');
+    $('#sd_civitai_post_process').val(extension_settings.sd.civitai_post_process);
     $('#sd_civitai_allow_mature').prop('checked', extension_settings.sd.civitai_allow_mature);
+    renderCivitaiLoraChips();
+    updateCivitaiResumeUi();
     $('#sd_google_api').val(extension_settings.sd.google_api);
     $('#sd_google_enhance').prop('checked', extension_settings.sd.google_enhance);
     $('#sd_google_duration').val(extension_settings.sd.google_duration);
@@ -893,6 +930,7 @@ async function refinePrompt(prompt, args = null) {
 }
 
 async function onChatChanged() {
+    updateCivitaiResumeUi();
     if (this_chid === undefined || selected_group) {
         $('#sd_character_prompt_block').hide();
         return;
@@ -1351,6 +1389,7 @@ function onBflUpsamplingInput() {
 function onCivitaiModelInput() {
     const model = String($('#sd_civitai_model').val() || '').trim();
     extension_settings.sd.civitai_model = model;
+    extension_settings.sd.civitai_model_base = '';
 
     if (extension_settings.sd.source === sources.civitai) {
         extension_settings.sd.model = model;
@@ -1362,6 +1401,7 @@ function onCivitaiModelInput() {
     }
 
     $('#sd_civitai_model_status').empty();
+    $('#sd_civitai_cost').empty();
     saveSettingsDebounced();
 }
 
@@ -1372,17 +1412,222 @@ function onCivitaiSearchInput() {
 
 function onCivitaiLorasInput() {
     extension_settings.sd.civitai_loras = String($('#sd_civitai_loras').val() || '');
-    saveSettingsDebounced();
-}
-
-function onCivitaiEnhancePromptInput() {
-    extension_settings.sd.civitai_enhance_prompt = !!$('#sd_civitai_enhance_prompt').prop('checked');
+    renderCivitaiLoraChips();
     $('#sd_civitai_cost').empty();
     saveSettingsDebounced();
 }
 
+function onCivitaiPromptModeInput() {
+    const mode = String($('#sd_civitai_prompt_mode').val() || 'off');
+    extension_settings.sd.civitai_prompt_mode = ['off', 'automatic', 'review'].includes(mode) ? mode : 'off';
+    extension_settings.sd.civitai_enhance_prompt = extension_settings.sd.civitai_prompt_mode === 'automatic';
+    $('#sd_civitai_cost').empty();
+    saveSettingsDebounced();
+}
+
+function onCivitaiTriggerWordsInput() {
+    extension_settings.sd.civitai_trigger_words = String($('#sd_civitai_trigger_words').val() || '').trim();
+    saveSettingsDebounced();
+}
+
+function onCivitaiQuantityInput() {
+    extension_settings.sd.civitai_quantity = clamp(Number($('#sd_civitai_quantity').val()) || 1, 1, 12);
+    $('#sd_civitai_quantity').val(extension_settings.sd.civitai_quantity);
+    $('#sd_civitai_cost').empty();
+    saveSettingsDebounced();
+}
+
+function onCivitaiMaxCostInput() {
+    extension_settings.sd.civitai_max_cost = clamp(Number($('#sd_civitai_max_cost').val()) || 0, 0, 1000000);
+    saveSettingsDebounced();
+}
+
+function onCivitaiSourceInput() {
+    const source = String($('#sd_civitai_source').val() || 'none');
+    extension_settings.sd.civitai_source = ['none', 'character', 'previous', 'upload'].includes(source) ? source : 'none';
+    $('#sd_civitai_source_upload').toggle(extension_settings.sd.civitai_source === 'upload');
+    $('#sd_civitai_cost').empty();
+    saveSettingsDebounced();
+}
+
+function onCivitaiSourceStrengthInput() {
+    extension_settings.sd.civitai_source_strength = clamp(Number($('#sd_civitai_source_strength').val()) || 0, 0, 1);
+    $('#sd_civitai_source_strength_value').text(extension_settings.sd.civitai_source_strength.toFixed(2));
+    saveSettingsDebounced();
+}
+
+async function onCivitaiSourceUploadInput(event) {
+    const file = event.currentTarget?.files?.[0];
+    if (!file) {
+        civitaiUploadedSourceImage = '';
+        civitaiUploadedSourceName = '';
+        civitaiUploadedSourceUrl = '';
+        $('#sd_civitai_source_status').text('Choose an image before generating.');
+        return;
+    }
+    if (file.size > 24 * 1024 * 1024) {
+        event.currentTarget.value = '';
+        civitaiUploadedSourceImage = '';
+        civitaiUploadedSourceName = '';
+        civitaiUploadedSourceUrl = '';
+        toastr.error('Choose an image smaller than 24 MB.', 'Civitai image-to-image');
+        return;
+    }
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'].includes(file.type)) {
+        event.currentTarget.value = '';
+        civitaiUploadedSourceImage = '';
+        civitaiUploadedSourceName = '';
+        civitaiUploadedSourceUrl = '';
+        toastr.error('Use a PNG, JPEG, WebP, GIF, or AVIF source image.', 'Civitai image-to-image');
+        return;
+    }
+    civitaiUploadedSourceImage = await getBase64Async(file);
+    civitaiUploadedSourceName = file.name;
+    civitaiUploadedSourceUrl = '';
+    $('#sd_civitai_source_status').text(`${file.name} is ready. Higher strength changes more of it.`);
+}
+
+function onCivitaiPostProcessInput() {
+    const value = String($('#sd_civitai_post_process').val() || 'none');
+    extension_settings.sd.civitai_post_process = ['none', 'upscale', 'remove-background'].includes(value) ? value : 'none';
+    $('#sd_civitai_cost').empty();
+    saveSettingsDebounced();
+}
+
+function getCivitaiLoraEntries() {
+    return String(extension_settings.sd.civitai_loras || '')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => {
+            const separator = line.lastIndexOf('=');
+            const reference = (separator === -1 ? line : line.slice(0, separator)).trim();
+            const strength = Number(separator === -1 ? 1 : line.slice(separator + 1).trim());
+            return { reference, strength: Number.isFinite(strength) ? strength : 1 };
+        });
+}
+
+function setCivitaiLoraEntry(reference, strength, metadata) {
+    const entries = getCivitaiLoraEntries().filter(entry => entry.reference !== reference);
+    entries.push({ reference, strength: clamp(Number(strength) || 0, -4, 4) });
+    extension_settings.sd.civitai_loras = entries.map(entry => `${entry.reference} = ${entry.strength}`).join('\n');
+    if (metadata) {
+        extension_settings.sd.civitai_lora_metadata[reference] = metadata;
+    }
+    $('#sd_civitai_loras').val(extension_settings.sd.civitai_loras);
+    renderCivitaiLoraChips();
+    $('#sd_civitai_cost').empty();
+    saveSettingsDebounced();
+}
+
+function removeCivitaiLoraEntry(reference) {
+    const entries = getCivitaiLoraEntries().filter(entry => entry.reference !== reference);
+    extension_settings.sd.civitai_loras = entries.map(entry => `${entry.reference} = ${entry.strength}`).join('\n');
+    delete extension_settings.sd.civitai_lora_metadata[reference];
+    $('#sd_civitai_loras').val(extension_settings.sd.civitai_loras);
+    renderCivitaiLoraChips();
+    $('#sd_civitai_cost').empty();
+    saveSettingsDebounced();
+}
+
+function addCivitaiTriggerWords(words) {
+    const current = String(extension_settings.sd.civitai_trigger_words || '')
+        .split(',')
+        .map(word => word.trim())
+        .filter(Boolean);
+    for (const word of words) {
+        if (!current.includes(word)) {
+            current.push(word);
+        }
+    }
+    extension_settings.sd.civitai_trigger_words = current.join(', ');
+    $('#sd_civitai_trigger_words').val(extension_settings.sd.civitai_trigger_words);
+    saveSettingsDebounced();
+}
+
+function renderCivitaiLoraChips() {
+    const container = $('#sd_civitai_lora_chips').empty();
+    if (!container.length) {
+        return;
+    }
+
+    for (const entry of getCivitaiLoraEntries()) {
+        const metadata = extension_settings.sd.civitai_lora_metadata?.[entry.reference] || {};
+        const chip = $('<div class="sd_civitai_lora_chip"></div>');
+        $('<span class="sd_civitai_lora_chip_name"></span>')
+            .text(metadata.text || entry.reference)
+            .attr('title', entry.reference)
+            .appendTo(chip);
+        $('<input type="range" min="-2" max="2" step="0.05" />')
+            .val(clamp(entry.strength, -2, 2))
+            .attr('title', `Strength ${entry.strength}`)
+            .on('change', event => setCivitaiLoraEntry(entry.reference, event.currentTarget.value, metadata))
+            .appendTo(chip);
+        const triggers = Array.isArray(metadata.trainedWords) ? metadata.trainedWords : [];
+        $('<button type="button" class="menu_button menu_button_icon" title="Insert trained trigger words"><i class="fa-solid fa-plus"></i><span>Trigger</span></button>')
+            .prop('disabled', triggers.length === 0)
+            .on('click', () => addCivitaiTriggerWords(triggers))
+            .appendTo(chip);
+        $('<button type="button" class="menu_button menu_button_icon" title="Remove LoRA"><i class="fa-solid fa-xmark"></i></button>')
+            .on('click', () => removeCivitaiLoraEntry(entry.reference))
+            .appendTo(chip);
+        container.append(chip);
+    }
+}
+
+function renderCivitaiLoraResults() {
+    const container = $('#sd_civitai_lora_results').empty();
+    for (const result of civitaiLoraSearchResults) {
+        const card = $('<div class="sd_civitai_lora_card"></div>');
+        if (result.preview) {
+            $('<img loading="lazy" alt="" referrerpolicy="no-referrer" />').attr('src', result.preview).appendTo(card);
+        }
+        $('<span class="sd_civitai_lora_card_name"></span>').text(result.text).attr('title', result.text).appendTo(card);
+        $('<small></small>').text(result.baseModel || 'Unknown base').appendTo(card);
+        $('<button type="button" class="menu_button"><i class="fa-solid fa-plus"></i> Add</button>')
+            .on('click', () => setCivitaiLoraEntry(result.value, 1, result))
+            .appendTo(card);
+        container.append(card);
+    }
+}
+
+async function onCivitaiLoraSearchClick() {
+    extension_settings.sd.civitai_lora_search = String($('#sd_civitai_lora_search').val() || '').trim();
+    saveSettingsDebounced();
+    if (!extension_settings.sd.civitai_model_base && extension_settings.sd.civitai_model) {
+        const resolved = await fetch('/api/sd/civitai/resolve', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ model: extension_settings.sd.civitai_model }),
+        });
+        if (!resolved.ok) {
+            throw new Error(await resolved.text());
+        }
+        const resource = await resolved.json();
+        extension_settings.sd.civitai_model = resource.air;
+        extension_settings.sd.civitai_model_base = resource.baseModel || '';
+        $('#sd_civitai_model').val(resource.air);
+        saveSettingsDebounced();
+    }
+    const result = await fetch('/api/sd/civitai/loras', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            query: extension_settings.sd.civitai_lora_search,
+            base_model: extension_settings.sd.civitai_model_base,
+            allow_mature: extension_settings.sd.civitai_allow_mature,
+        }),
+    });
+    if (!result.ok) {
+        throw new Error(await result.text());
+    }
+    civitaiLoraSearchResults = await result.json();
+    renderCivitaiLoraResults();
+}
+
 function onCivitaiMatureInput() {
     extension_settings.sd.civitai_allow_mature = !!$('#sd_civitai_allow_mature').prop('checked');
+    $('#sd_civitai_cost').empty();
     saveSettingsDebounced();
 }
 
@@ -1405,11 +1650,13 @@ async function onCivitaiResolveClick() {
         const resource = await result.json();
         extension_settings.sd.civitai_model = resource.air;
         extension_settings.sd.model = resource.air;
+        extension_settings.sd.civitai_model_base = resource.baseModel || '';
         $('#sd_civitai_model').val(resource.air);
-        $('#sd_civitai_model_status').text(`${resource.name} (${resource.ecosystem.toUpperCase()})`);
+        const warnings = Array.isArray(resource.warnings) ? resource.warnings : [];
+        $('#sd_civitai_model_status').text(`${resource.name} (${resource.ecosystem.toUpperCase()})${warnings.length ? ` — ${warnings.join(' ')}` : ''}`);
         await loadModels();
         saveSettingsDebounced();
-        toastr.success('Civitai model resolved.');
+        warnings.length ? toastr.warning(warnings.join('\n'), 'Civitai model validated') : toastr.success('Civitai model validated for generation.');
     } catch (error) {
         $('#sd_civitai_model_status').text(String(error));
         toastr.error(`Could not resolve Civitai model: ${error.message}`);
@@ -1418,25 +1665,47 @@ async function onCivitaiResolveClick() {
 
 async function onCivitaiPreviewClick() {
     try {
+        const body = getCivitaiGenerationBody('SillyTavern Civitai cost preview', '', {
+            source_image: extension_settings.sd.civitai_source === 'none' ? '' : `data:image/png;base64,${PNG_PIXEL}`,
+            enhance_prompt: extension_settings.sd.civitai_prompt_mode !== 'off',
+        });
         const result = await fetch('/api/sd/civitai/preview', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify(getCivitaiGenerationBody('SillyTavern Civitai cost preview', '')),
+            body: JSON.stringify(body),
         });
         if (!result.ok) {
             throw new Error(await result.text());
         }
 
         const data = await result.json();
-        const total = Number(data?.cost?.total);
-        const cost = Number.isFinite(total) ? `${total} Buzz` : 'Cost unavailable';
-        const detail = extension_settings.sd.civitai_enhance_prompt ? `${cost} including prompt enhancement` : cost;
+        const cost = formatCivitaiCost(data);
+        const detail = extension_settings.sd.civitai_prompt_mode !== 'off' ? `${cost} including prompt enhancement` : cost;
         $('#sd_civitai_cost').text(detail);
-        toastr.info(cost, 'Civitai cost preview');
+        if (data?.transactions?.insufficientBuzz) {
+            toastr.error(`${cost}\nCivitai reports insufficient Buzz.`, 'Civitai cost preview');
+        } else {
+            toastr.info(cost, 'Civitai cost preview');
+        }
+        if (Array.isArray(data?.warnings) && data.warnings.length) {
+            toastr.warning(data.warnings.join('\n'), 'Civitai resource notice');
+        }
     } catch (error) {
         $('#sd_civitai_cost').text('Preview failed');
         toastr.error(`Could not preview Civitai cost: ${error.message}`);
     }
+}
+
+function formatCivitaiCost(data) {
+    const total = Number(data?.cost?.total);
+    const items = Array.isArray(data?.transactions?.list) ? data.transactions.list : [];
+    const breakdown = items
+        .map(item => `${Number(item?.amount) || 0} ${String(item?.accountType || item?.type || 'Buzz')}`)
+        .join(' + ');
+    if (breakdown) {
+        return `${Number.isFinite(total) ? `${total} Buzz` : 'Cost unavailable'} (${breakdown})`;
+    }
+    return Number.isFinite(total) ? `${total} Buzz` : 'Cost unavailable';
 }
 
 function onStabilityStylePresetChange() {
@@ -3486,9 +3755,10 @@ async function generatePrompt(quietPrompt) {
  * @param {function} callback Callback function to be called after image generation
  * @param {string} initiator The initiator of the image generation
  * @param {AbortSignal} signal Abort signal to cancel the request
+ * @param {object} [requestOptions] Provider-specific replay options
  * @returns
  */
-async function sendGenerationRequest(generationType, prompt, additionalNegativePrefix, characterName, callback, initiator, signal) {
+async function sendGenerationRequest(generationType, prompt, additionalNegativePrefix, characterName, callback, initiator, signal, requestOptions = {}) {
     const noCharPrefix = [generationMode.FREE, generationMode.BACKGROUND, generationMode.USER, generationMode.USER_MULTIMODAL, generationMode.FREE_EXTENDED];
     const isCharChat = this_chid !== undefined && !selected_group;
     const ignoreNoCharForSwipe = initiator === initiators.swipe && isCharChat;
@@ -3503,14 +3773,18 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
         ? extension_settings.sd.negative_prompt
         : combinePrefixes(extension_settings.sd.negative_prompt, getCharacterNegativePrefix());
 
-    const prefixedPrompt = substituteParams(combinePrefixes(prefix, prompt, '{prompt}'));
-    const negativePrompt = substituteParams(combinePrefixes(additionalNegativePrefix, negativePrefix));
+    const prefixedPrompt = requestOptions.skipPromptProcessing
+        ? String(requestOptions.prefixedPrompt ?? prompt)
+        : substituteParams(combinePrefixes(prefix, prompt, '{prompt}'));
+    const negativePrompt = requestOptions.skipPromptProcessing
+        ? String(requestOptions.negativePrompt ?? additionalNegativePrefix)
+        : substituteParams(combinePrefixes(additionalNegativePrefix, negativePrefix));
 
     let result = { format: '', data: '' };
     const currentChatId = getCurrentChatId();
 
     try {
-        switch (extension_settings.sd.source) {
+        switch (requestOptions.source || extension_settings.sd.source) {
             case sources.extras:
                 result = await generateExtrasImage(prefixedPrompt, negativePrompt, signal);
                 break;
@@ -3563,7 +3837,19 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
                 result = await generateHuggingFaceImage(prefixedPrompt, signal);
                 break;
             case sources.civitai:
-                result = await generateCivitaiImage(prefixedPrompt, negativePrompt, signal);
+                result = await generateCivitaiImage(prefixedPrompt, negativePrompt, signal, {
+                    body: requestOptions.civitaiBody,
+                    sourceReference: requestOptions.sourceReference,
+                    quantity: callback ? 1 : undefined,
+                    pending: {
+                        prompt,
+                        additionalNegativePrefix,
+                        characterName,
+                        generationType,
+                        initiator,
+                        prefixedPrompt,
+                    },
+                });
                 break;
             case sources.chutes:
                 result = await generateChutesImage(prefixedPrompt, negativePrompt, signal);
@@ -3607,6 +3893,10 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
             toastr.info('Image generation stopped.', 'Image Generation');
             return;
         }
+        if (['CivitaiPromptReviewCancelled', 'CivitaiSpendingCancelled'].includes(err?.name)) {
+            toastr.info(err.message, 'Image Generation');
+            return;
+        }
 
         console.error('Image generation request error: ', err);
         toastr.error('Image generation failed. Please try again.' + '\n\n' + String(err), 'Image Generation');
@@ -3621,20 +3911,36 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
 
     const filename = characterName ? `${characterName}_${humanizedDateTime()}` : humanizedDateTime();
     const finalPrefixedPrompt = typeof result.prompt === 'string' && result.prompt ? result.prompt : prefixedPrompt;
-    const base64Image = await saveBase64AsFile(result.data, characterName, filename, result.format);
+    const generatedImages = Array.isArray(result.images) && result.images.length
+        ? result.images.filter(item => item?.data)
+        : [{ data: result.data, format: result.format }];
+    const savedImages = [];
+    const formats = [];
+    for (let index = 0; index < generatedImages.length; index++) {
+        const item = generatedImages[index];
+        const itemFilename = generatedImages.length > 1 ? `${filename}_${index + 1}` : filename;
+        savedImages.push(await saveBase64AsFile(item.data, characterName, itemFilename, item.format || result.format));
+        formats.push(item.format || result.format);
+    }
     callback
-        ? await callback(prompt, base64Image, generationType, additionalNegativePrefix, initiator, finalPrefixedPrompt, result.format)
-        : await sendMessage(prompt, base64Image, generationType, additionalNegativePrefix, initiator, finalPrefixedPrompt, result.format);
-    return base64Image;
+        ? await callback(prompt, savedImages[0], generationType, additionalNegativePrefix, initiator, finalPrefixedPrompt, formats[0], result.civitai)
+        : await sendMessage(prompt, savedImages, generationType, additionalNegativePrefix, initiator, finalPrefixedPrompt, formats, result.civitai);
+    if (result.civitai?.workflowId) {
+        clearCivitaiPendingGeneration(result.civitai.workflowId);
+    }
+    return savedImages[0];
 }
 
-function getCivitaiGenerationBody(prompt, negativePrompt) {
+function getCivitaiGenerationBody(prompt, negativePrompt, overrides = {}) {
+    const { skip_trigger_words, ...requestOverrides } = overrides;
+    const triggerWords = String(extension_settings.sd.civitai_trigger_words || '').trim();
+    const effectivePrompt = skip_trigger_words || !triggerWords ? prompt : combinePrefixes(triggerWords, prompt);
     return {
-        prompt,
+        prompt: effectivePrompt,
         negative_prompt: negativePrompt,
         model: extension_settings.sd.civitai_model || extension_settings.sd.model,
         loras: extension_settings.sd.civitai_loras,
-        enhance_prompt: extension_settings.sd.civitai_enhance_prompt,
+        enhance_prompt: extension_settings.sd.civitai_prompt_mode === 'automatic',
         allow_mature: extension_settings.sd.civitai_allow_mature,
         width: extension_settings.sd.width,
         height: extension_settings.sd.height,
@@ -3644,22 +3950,240 @@ function getCivitaiGenerationBody(prompt, negativePrompt) {
         scheduler: extension_settings.sd.scheduler,
         clip_skip: extension_settings.sd.clip_skip,
         seed: extension_settings.sd.seed >= 0 ? extension_settings.sd.seed : undefined,
+        quantity: extension_settings.sd.civitai_quantity,
+        source_strength: extension_settings.sd.civitai_source_strength,
+        post_process: extension_settings.sd.civitai_post_process,
+        max_cost: extension_settings.sd.civitai_max_cost,
+        ...requestOverrides,
     };
 }
 
+async function getCivitaiSourceImage() {
+    const source = String(extension_settings.sd.civitai_source || 'none');
+    if (source === 'none') {
+        return null;
+    }
+
+    if (source === 'upload') {
+        if (!civitaiUploadedSourceImage) {
+            throw new Error('Choose an image-to-image upload before generating.');
+        }
+        if (!civitaiUploadedSourceUrl) {
+            const match = civitaiUploadedSourceImage.match(/^data:image\/([a-z0-9.+-]+);base64,(.+)$/i);
+            if (!match) {
+                throw new Error('The uploaded image could not be encoded for Civitai.');
+            }
+            const format = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+            const context = getContext();
+            civitaiUploadedSourceUrl = await saveBase64AsFile(
+                match[2],
+                context.name2 || 'civitai',
+                `civitai_source_${humanizedDateTime()}`,
+                format,
+            );
+        }
+        return { data: civitaiUploadedSourceImage, reference: civitaiUploadedSourceUrl, name: civitaiUploadedSourceName };
+    }
+
+    let reference = '';
+    if (source === 'character') {
+        reference = getCharacterAvatarUrl();
+    } else if (source === 'previous') {
+        const context = getContext();
+        for (const message of context.chat.slice().reverse()) {
+            const media = Array.isArray(message?.extra?.media) ? message.extra.media.slice().reverse() : [];
+            const image = media.find(item => (!item?.type || item.type === MEDIA_TYPE.IMAGE) && item?.url);
+            if (image) {
+                reference = image.url;
+                break;
+            }
+        }
+    }
+
+    if (!reference) {
+        throw new Error(source === 'previous' ? 'No previous generated image was found.' : 'The current character has no usable avatar.');
+    }
+    return { data: await loadCivitaiSourceReference(reference), reference };
+}
+
+async function loadCivitaiSourceReference(reference) {
+    const response = await fetch(reference);
+    if (!response.ok) {
+        throw new Error(`Could not load the saved image-to-image source (${response.status}).`);
+    }
+    const blob = await response.blob();
+    if (blob.size > 24 * 1024 * 1024) {
+        throw new Error('The saved image-to-image source is larger than 24 MB.');
+    }
+    return getBase64Async(blob);
+}
+
+async function reviewCivitaiPrompt(prompt, negativePrompt, signal) {
+    const response = await fetch('/api/sd/civitai/enhance', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        signal,
+        body: JSON.stringify({
+            model: extension_settings.sd.civitai_model || extension_settings.sd.model,
+            prompt,
+            negative_prompt: negativePrompt,
+            allow_mature: extension_settings.sd.civitai_allow_mature,
+        }),
+    });
+    if (!response.ok) {
+        throw new Error(await response.text());
+    }
+
+    const workflow = await pollCivitaiWorkflow(await response.json(), signal);
+    const enhancement = workflow?.enhancement;
+    if (!enhancement?.prompt) {
+        throw new Error('Civitai completed prompt review without returning an enhanced prompt.');
+    }
+
+    const content = $('<div class="civitai_prompt_review"></div>');
+    $('<p></p>').text('The helper has already spent 1 Buzz. Edit either suggestion, then choose Generate.').appendTo(content);
+    $('<label>Original positive prompt</label>').appendTo(content);
+    $('<textarea class="text_pole" rows="4" readonly></textarea>').val(prompt).appendTo(content);
+    $('<label>Suggested positive prompt</label>').appendTo(content);
+    const positive = $('<textarea class="text_pole" rows="6"></textarea>').val(enhancement.prompt).appendTo(content);
+    $('<label>Suggested negative prompt</label>').appendTo(content);
+    const negative = $('<textarea class="text_pole" rows="4"></textarea>').val(enhancement.negativePrompt || negativePrompt).appendTo(content);
+
+    const issueTexts = Array.isArray(enhancement.issues)
+        ? enhancement.issues.map(issue => String(issue?.description || issue?.message || issue)).filter(Boolean)
+        : [];
+    const recommendations = Array.isArray(enhancement.recommendations) ? enhancement.recommendations : [];
+    if (issueTexts.length || recommendations.length) {
+        const notes = $('<div class="marginTop5"></div>').appendTo(content);
+        $('<strong>Helper notes</strong>').appendTo(notes);
+        const list = $('<ul></ul>').appendTo(notes);
+        for (const note of [...issueTexts, ...recommendations]) {
+            $('<li></li>').text(note).appendTo(list);
+        }
+    }
+
+    const popup = new Popup(content.get(0), POPUP_TYPE.CONFIRM, '', {
+        okButton: 'Generate',
+        cancelButton: 'Cancel',
+        wide: true,
+        large: true,
+        allowVerticalScrolling: true,
+    });
+    const result = await popup.show();
+    if (result !== POPUP_RESULT.AFFIRMATIVE) {
+        const error = new Error('Civitai prompt review canceled.');
+        error.name = 'CivitaiPromptReviewCancelled';
+        throw error;
+    }
+
+    return {
+        prompt: String(positive.val() || '').trim(),
+        negativePrompt: String(negative.val() || '').trim(),
+        originalPrompt: prompt,
+        originalNegativePrompt: negativePrompt,
+        issues: enhancement.issues,
+        recommendations: enhancement.recommendations,
+        servicePrompt: enhancement.prompt,
+        serviceNegativePrompt: enhancement.negativePrompt,
+        cost: workflow.cost,
+        transactions: workflow.transactions,
+    };
+}
+
+async function confirmCivitaiSpending(body, signal) {
+    const maximumCost = Number(body.max_cost);
+    if (!Number.isFinite(maximumCost) || maximumCost <= 0) {
+        return body;
+    }
+    if (body.confirm_over_max === true) {
+        return body;
+    }
+
+    const response = await fetch('/api/sd/civitai/preview', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        signal,
+        body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+        throw new Error(await response.text());
+    }
+    const preview = await response.json();
+    if (preview?.transactions?.insufficientBuzz) {
+        throw new Error(`Civitai reports insufficient Buzz. Estimated cost: ${formatCivitaiCost(preview)}.`);
+    }
+
+    const estimated = Number(preview?.cost?.total);
+    const budgetSpent = Number(body.budget_spent) || 0;
+    if (Number.isFinite(estimated) && estimated + budgetSpent > maximumCost) {
+        const confirmed = await Popup.show.confirm(
+            'Civitai spending confirmation',
+            `This request is estimated at <strong>${estimated + budgetSpent} Buzz</strong>, above your ${maximumCost} Buzz limit. Generate anyway?`,
+            { okButton: 'Spend and generate', cancelButton: 'Cancel' },
+        );
+        if (confirmed !== POPUP_RESULT.AFFIRMATIVE) {
+            const error = new Error('Civitai generation canceled at the spending confirmation.');
+            error.name = 'CivitaiSpendingCancelled';
+            throw error;
+        }
+        return { ...body, confirm_over_max: true };
+    }
+    return body;
+}
+
 /**
- * Generates an image using Civitai's Orchestration API.
+ * Generates images using Civitai's Orchestration API.
  * @param {string} prompt Positive prompt.
  * @param {string} negativePrompt Negative prompt.
  * @param {AbortSignal} signal Abort signal used to cancel the remote workflow.
- * @returns {Promise<{format: string, data: string, prompt?: string}>}
+ * @param {object} [options] Replay and persistence options.
+ * @returns {Promise<{format: string, data: string, images: {format: string, data: string}[], prompt: string, negativePrompt: string, civitai: object}>}
  */
-async function generateCivitaiImage(prompt, negativePrompt, signal) {
+async function generateCivitaiImage(prompt, negativePrompt, signal, options = {}) {
+    let finalPrompt = prompt;
+    let finalNegativePrompt = negativePrompt;
+    let review = null;
+    let source = null;
+    let reviewSpendConfirmed = false;
+
+    if (!options.body) {
+        source = await getCivitaiSourceImage();
+    }
+    if (!options.body && extension_settings.sd.civitai_prompt_mode === 'review') {
+        const previewBody = getCivitaiGenerationBody(prompt, negativePrompt, {
+            ...(source ? { source_image: source.data } : {}),
+            enhance_prompt: true,
+            ...(options.quantity ? { quantity: options.quantity } : {}),
+        });
+        const checkedPreview = await confirmCivitaiSpending(previewBody, signal);
+        reviewSpendConfirmed = checkedPreview.confirm_over_max === true;
+        const triggerWords = String(extension_settings.sd.civitai_trigger_words || '').trim();
+        const promptForReview = triggerWords ? combinePrefixes(triggerWords, prompt) : prompt;
+        review = await reviewCivitaiPrompt(promptForReview, negativePrompt, signal);
+        finalPrompt = review.prompt;
+        finalNegativePrompt = review.negativePrompt;
+    }
+
+    let body = getCivitaiGenerationBody(finalPrompt, finalNegativePrompt, {
+        ...(options.body || {}),
+        ...(source ? { source_image: source.data } : {}),
+        ...(options.quantity ? { quantity: options.quantity } : {}),
+        ...(review ? {
+            prompt: finalPrompt,
+            negative_prompt: finalNegativePrompt,
+            enhance_prompt: false,
+            budget_spent: Number(review?.cost?.total) || 1,
+            ...(reviewSpendConfirmed ? { confirm_over_max: true } : {}),
+            skip_trigger_words: true,
+        } : {}),
+    });
+    body = await confirmCivitaiSpending(body, signal);
+
     const submitResult = await fetch('/api/sd/civitai/generate', {
         method: 'POST',
         headers: getRequestHeaders(),
         signal,
-        body: JSON.stringify(getCivitaiGenerationBody(prompt, negativePrompt)),
+        body: JSON.stringify(body),
     });
     if (!submitResult.ok) {
         throw new Error(await submitResult.text());
@@ -3671,7 +4195,20 @@ async function generateCivitaiImage(prompt, negativePrompt, signal) {
         throw new Error('Civitai did not return a workflow ID.');
     }
 
+    civitaiActiveWorkflowId = workflowId;
+    const sourceReference = source?.reference || options.sourceReference || '';
+    setCivitaiPendingGeneration({
+        ...(options.pending || {}),
+        id: workflowId,
+        submittedAt: new Date().toISOString(),
+        chatId: getCurrentChatId(),
+        body: sanitizeCivitaiPendingBody(body),
+        sourceReference,
+        review,
+    });
+
     const cancelRemoteWorkflow = () => {
+        clearCivitaiPendingGeneration(workflowId);
         fetch('/api/sd/civitai/cancel', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -3680,56 +4217,255 @@ async function generateCivitaiImage(prompt, negativePrompt, signal) {
     };
     signal?.addEventListener('abort', cancelRemoteWorkflow, { once: true });
 
+    try {
+        workflow = await pollCivitaiWorkflow(workflow, signal);
+        const outputs = Array.isArray(workflow.images) ? workflow.images : [];
+        if (!outputs.length) {
+            throw new Error('Civitai completed the workflow without returning an image.');
+        }
+
+        const total = Number(workflow?.cost?.total);
+        if (Number.isFinite(total)) {
+            $('#sd_civitai_cost').text(formatCivitaiCost(workflow));
+        }
+        if (workflow?.enhancement?.prompt) {
+            console.info('Civitai enhanced image prompt:', workflow.enhancement);
+            toastr.success('Civitai enhanced the prompt before generation.', 'Image Generation');
+        }
+        if (Array.isArray(workflow?.warnings) && workflow.warnings.length) {
+            toastr.warning(workflow.warnings.join('\n'), 'Civitai resource notice');
+        }
+
+        const metadata = createCivitaiGenerationMetadata(workflow, {
+            originalPrompt: review?.originalPrompt || prompt,
+            originalNegativePrompt: negativePrompt,
+            review,
+            sourceReference,
+        });
+        if (Number.isFinite(Number(metadata?.cost?.total))) {
+            $('#sd_civitai_cost').text(`${Number(metadata.cost.total)} Buzz`);
+        }
+        return {
+            format: outputs[0]?.format || 'png',
+            data: outputs[0]?.image || '',
+            images: outputs.map(output => ({ format: output.format || 'png', data: output.image })),
+            prompt: metadata.finalPrompt,
+            negativePrompt: metadata.finalNegativePrompt,
+            civitai: metadata,
+        };
+    } finally {
+        civitaiActiveWorkflowId = '';
+        signal?.removeEventListener('abort', cancelRemoteWorkflow);
+    }
+}
+
+async function pollCivitaiWorkflow(initialWorkflow, signal) {
+    let workflow = initialWorkflow;
     const pollDelays = [2000, 5000, 10000, 15000, 30000];
     let pollIndex = 0;
 
-    try {
-        while (true) {
-            if (signal?.aborted) {
-                throw new Error('Civitai image generation was canceled.');
-            }
+    while (true) {
+        if (signal?.aborted) {
+            throw new Error('Civitai image generation was canceled.');
+        }
+        updateCivitaiProgress(workflow);
+        if (workflow?.terminal && workflow.status !== 'succeeded') {
+            throw new Error(workflow.error || `Civitai workflow ${workflow.status}.`);
+        }
+        if (workflow.status === 'succeeded' && (workflow?.enhancement || (Array.isArray(workflow?.images) && workflow.images.length))) {
+            updateCivitaiProgress(workflow);
+            return workflow;
+        }
 
-            if (workflow?.terminal && workflow.status !== 'succeeded') {
-                throw new Error(workflow.error || `Civitai workflow ${workflow.status}.`);
-            }
+        if (workflow.status !== 'succeeded') {
+            await waitForCivitaiPoll(pollDelays[Math.min(pollIndex++, pollDelays.length - 1)], signal);
+        }
+        workflow = await fetchCivitaiWorkflowStatus(String(workflow?.id || ''), signal);
+    }
+}
 
-            if (workflow.status !== 'succeeded') {
-                await waitForCivitaiPoll(pollDelays[Math.min(pollIndex++, pollDelays.length - 1)], signal);
-            }
-
-            if (signal?.aborted) {
-                throw new Error('Civitai image generation was canceled.');
-            }
-
-            const statusResult = await fetch('/api/sd/civitai/status', {
+async function fetchCivitaiWorkflowStatus(workflowId, signal) {
+    let lastError;
+    for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+            const response = await fetch('/api/sd/civitai/status', {
                 method: 'POST',
                 headers: getRequestHeaders(),
                 signal,
                 body: JSON.stringify({ id: workflowId }),
             });
-            if (!statusResult.ok) {
-                throw new Error(await statusResult.text());
+            if (response.ok) {
+                return response.json();
             }
-
-            workflow = await statusResult.json();
-            if (workflow.status === 'succeeded' && workflow.image) {
-                const total = Number(workflow?.cost?.total);
-                if (Number.isFinite(total)) {
-                    $('#sd_civitai_cost').text(`${total} Buzz`);
-                }
-                if (workflow?.enhancement?.prompt) {
-                    console.info('Civitai enhanced image prompt:', workflow.enhancement);
-                    toastr.success('Civitai enhanced the prompt before generation.', 'Image Generation');
-                }
-                return {
-                    format: workflow.format || 'png',
-                    data: workflow.image,
-                    prompt: workflow?.enhancement?.prompt || undefined,
-                };
+            const message = await response.text();
+            if (response.status !== 429 && response.status < 500) {
+                throw new Error(message);
             }
+            lastError = new Error(message);
+        } catch (error) {
+            if (signal?.aborted) {
+                throw error;
+            }
+            lastError = error;
         }
-    } finally {
-        signal?.removeEventListener('abort', cancelRemoteWorkflow);
+
+        const seconds = Math.min(30, 2 ** attempt);
+        updateCivitaiProgress({ progress: { status: 'retrying', rate: 0 }, status: 'retrying' }, `Connection interrupted; retrying in ${seconds}s…`);
+        await waitForCivitaiPoll(seconds * 1000, signal);
+    }
+    throw lastError || new Error('Could not retrieve the Civitai workflow after retries. Use Resume last generation.');
+}
+
+function updateCivitaiProgress(workflow, overrideMessage = '') {
+    const progress = workflow?.progress || {};
+    const rate = Number(progress.rate);
+    const percent = Number.isFinite(rate) ? ` ${Math.round(rate * 100)}%` : '';
+    const queue = Number.isFinite(Number(progress.queuePosition)) ? ` — queue ${Number(progress.queuePosition)}` : '';
+    const labels = {
+        unassigned: 'Preparing request',
+        preparing: 'Preparing model',
+        scheduled: 'Queued',
+        processing: 'Generating',
+        succeeded: 'Generation complete',
+        retrying: 'Retrying connection',
+    };
+    const status = String(progress.status || workflow?.status || 'unassigned');
+    const message = overrideMessage || `${labels[status] || status}${percent}${queue}`;
+    $('#sd_civitai_progress').text(message);
+    $(`.action-loader-toast[data-slug="${MODULE_NAME}-image-generation"] .action-loader-message`).text(message);
+}
+
+function createCivitaiGenerationMetadata(workflow, client) {
+    const metadata = workflow?.metadata || {};
+    const enhancement = workflow?.enhancement || client.review || null;
+    const finalPrompt = String(enhancement?.prompt || metadata.prompt || client.originalPrompt || '');
+    const finalNegativePrompt = String(enhancement?.negativePrompt || metadata.negativePrompt || client.originalNegativePrompt || '');
+    const originalPrompt = String(client.review?.originalPrompt || metadata.prompt || client.originalPrompt || '');
+    const originalNegativePrompt = String(client.review?.originalNegativePrompt || metadata.negativePrompt || client.originalNegativePrompt || '');
+    const generationCost = Number(workflow?.cost?.total);
+    const reviewCost = Number(client.review?.cost?.total);
+    const combinedCost = Number.isFinite(reviewCost)
+        ? {
+            ...(workflow?.cost || {}),
+            total: (Number.isFinite(generationCost) ? generationCost : 0) + reviewCost,
+            generation: Number.isFinite(generationCost) ? generationCost : null,
+            promptEnhancement: reviewCost,
+        }
+        : (workflow?.cost ?? null);
+    return {
+        version: 1,
+        workflowId: String(workflow?.id || ''),
+        cost: combinedCost,
+        transactions: client.review
+            ? { generation: workflow?.transactions ?? null, promptEnhancement: client.review.transactions ?? null }
+            : (workflow?.transactions ?? null),
+        model: metadata.model ?? null,
+        loras: Array.isArray(metadata.loras) ? metadata.loras : [],
+        originalPrompt,
+        originalNegativePrompt,
+        finalPrompt,
+        finalNegativePrompt,
+        enhancement,
+        settings: {
+            ...metadata,
+            inputPrompt: String(metadata.prompt || originalPrompt),
+            inputNegativePrompt: String(metadata.negativePrompt || originalNegativePrompt),
+            prompt: finalPrompt,
+            negativePrompt: finalNegativePrompt,
+            source: {
+                ...(metadata.source || { enabled: false }),
+                reference: client.sourceReference || '',
+            },
+        },
+        warnings: Array.isArray(workflow?.warnings) ? workflow.warnings : [],
+    };
+}
+
+async function buildCivitaiReplayBody(metadata, { sameSeed = false, quantity = 1 } = {}) {
+    const settings = metadata?.settings || {};
+    const model = metadata?.model?.air || settings?.model?.air;
+    if (!model || !metadata?.finalPrompt) {
+        throw new Error('This image does not contain complete Civitai recreation metadata.');
+    }
+
+    let sourceImage = '';
+    const sourceReference = String(settings?.source?.reference || '');
+    if (settings?.source?.enabled) {
+        if (!sourceReference) {
+            throw new Error('The saved image-to-image source is unavailable, so this image cannot be recreated exactly.');
+        }
+        sourceImage = await loadCivitaiSourceReference(sourceReference);
+    }
+
+    const loras = Array.isArray(metadata.loras) ? metadata.loras : [];
+    return {
+        prompt: metadata.finalPrompt,
+        negative_prompt: metadata.finalNegativePrompt || '',
+        model,
+        loras: loras.map(lora => `${lora.air} = ${lora.strength}`).join('\n'),
+        enhance_prompt: false,
+        allow_mature: settings.allowMature === true,
+        width: settings.width,
+        height: settings.height,
+        steps: settings.steps,
+        cfg_scale: settings.cfgScale,
+        sampler: settings.sampler,
+        scheduler: settings.scheduler,
+        clip_skip: settings.clipSkip,
+        seed: sameSeed ? settings.seed : undefined,
+        quantity: clamp(Number(quantity) || 1, 1, 12),
+        source_image: sourceImage,
+        source_strength: settings?.source?.strength ?? 0.7,
+        post_process: settings.postProcess || 'none',
+        max_cost: extension_settings.sd.civitai_max_cost,
+        skip_trigger_words: true,
+    };
+}
+
+function sanitizeCivitaiPendingBody(body) {
+    const result = { ...body };
+    delete result.source_image;
+    return result;
+}
+
+function getCivitaiPendingGeneration() {
+    try {
+        const value = localStorage.getItem(CIVITAI_PENDING_STORAGE_KEY);
+        return value ? JSON.parse(value) : null;
+    } catch (error) {
+        console.warn('Could not read the pending Civitai generation:', error);
+        return null;
+    }
+}
+
+function setCivitaiPendingGeneration(value) {
+    try {
+        localStorage.setItem(CIVITAI_PENDING_STORAGE_KEY, JSON.stringify(value));
+    } catch (error) {
+        console.warn('Could not persist the pending Civitai generation:', error);
+        toastr.warning('Android-safe Civitai resume could not be saved in this browser.');
+    }
+    updateCivitaiResumeUi();
+}
+
+function clearCivitaiPendingGeneration(workflowId) {
+    const pending = getCivitaiPendingGeneration();
+    if (workflowId && pending?.id && pending.id !== workflowId) {
+        return;
+    }
+    try {
+        localStorage.removeItem(CIVITAI_PENDING_STORAGE_KEY);
+    } catch (error) {
+        console.warn('Could not clear the pending Civitai generation:', error);
+    }
+    updateCivitaiResumeUi();
+}
+
+function updateCivitaiResumeUi() {
+    const pending = getCivitaiPendingGeneration();
+    $('#sd_civitai_resume').toggleClass('disabled', !pending?.id);
+    if (pending?.id && !civitaiActiveWorkflowId) {
+        $('#sd_civitai_progress').text(`Saved workflow ${String(pending.id).slice(0, 18)}…`);
     }
 }
 
@@ -5260,28 +5996,35 @@ async function onComfyRenameWorkflowClick() {
 /**
  * Sends a chat message with the generated image.
  * @param {string} prompt Prompt used for the image generation
- * @param {string} image Base64 encoded image
+ * @param {string|string[]} image Saved image path or paths
  * @param {number} generationType Generation type of the image
  * @param {string} additionalNegativePrefix Additional negative prompt used for the image generation
  * @param {string} initiator The initiator of the image generation
  * @param {string} prefixedPrompt Prompt with an attached specific prefix
- * @param {string} format Format of the image (e.g., 'png', 'jpg')
+ * @param {string|string[]} format Format or formats of the image (e.g., 'png', 'jpg')
+ * @param {object} [civitaiMetadata] Reproducible Civitai generation metadata
  */
-async function sendMessage(prompt, image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, format) {
+async function sendMessage(prompt, image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, format, civitaiMetadata) {
     const context = getContext();
     const name = context.groupId ? systemUserName : context.name2;
     const template = extension_settings.sd.prompts[generationMode.MESSAGE] || '{{prompt}}';
     const messageText = substituteParamsExtended(template, { char: name, prompt: prompt, prefixedPrompt: prefixedPrompt });
-    const mediaType = isVideo(format) ? MEDIA_TYPE.VIDEO : MEDIA_TYPE.IMAGE;
-    /** @type {MediaAttachment} */
-    const mediaAttachment = {
-        url: image,
-        type: mediaType,
+    const images = Array.isArray(image) ? image : [image];
+    const formats = Array.isArray(format) ? format : [format];
+    /** @type {MediaAttachment[]} */
+    const mediaAttachments = images.map((url, index) => ({
+        url,
+        type: isVideo(formats[index] || formats[0]) ? MEDIA_TYPE.VIDEO : MEDIA_TYPE.IMAGE,
         title: prompt,
         generation_type: generationType,
         negative: additionalNegativePrefix,
         source: MEDIA_SOURCE.GENERATED,
-    };
+        ...(civitaiMetadata ? {
+            width: civitaiMetadata?.settings?.width,
+            height: civitaiMetadata?.settings?.height,
+            civitai: { ...civitaiMetadata, outputIndex: index },
+        } : {}),
+    }));
     /** @type {ChatMessage} */
     const message = {
         name: name,
@@ -5290,7 +6033,7 @@ async function sendMessage(prompt, image, generationType, additionalNegativePref
         send_date: getMessageTimeStamp(),
         mes: messageText,
         extra: {
-            media: [mediaAttachment],
+            media: mediaAttachments,
             media_display: MEDIA_DISPLAY.GALLERY,
             media_index: 0,
             inline_image: false,
@@ -5322,6 +6065,178 @@ function getVisibilityByInitiator(initiator) {
             return !!extension_settings.sd.tool_visible;
         default:
             return false;
+    }
+}
+
+function addCivitaiMediaActions(messageId) {
+    const context = getContext();
+    const message = context.chat?.[messageId];
+    if (!message || !Array.isArray(message?.extra?.media)) {
+        return;
+    }
+    const messageElement = $(`.mes[mesid="${messageId}"]`);
+    messageElement.find('.mes_media_container[data-index]').each((_, element) => {
+        const container = $(element);
+        const index = Number(container.attr('data-index'));
+        const attachment = message.extra.media[index];
+        if (!attachment?.civitai) {
+            return;
+        }
+        const controls = container.find('.mes_img_controls, .mes_video_controls').first();
+        if (!controls.length || controls.find('.civitai_recreate_exact').length) {
+            return;
+        }
+        controls.prepend(
+            $('<div title="Copy Civitai settings" class="right_menu_button fa-lg fa-solid fa-clipboard civitai_media_action civitai_copy_settings"></div>'),
+        );
+        controls.prepend(
+            $('<div title="Recreate exactly" class="right_menu_button fa-lg fa-solid fa-repeat civitai_media_action civitai_recreate_exact"></div>'),
+        );
+    });
+}
+
+function getCivitaiMediaFromAction(target) {
+    const container = $(target).closest('.mes_media_container');
+    const messageElement = container.closest('.mes');
+    const messageId = Number(messageElement.attr('mesid'));
+    const mediaIndex = Number(container.attr('data-index'));
+    const message = getContext().chat?.[messageId];
+    const attachment = message?.extra?.media?.[mediaIndex];
+    return { message, attachment };
+}
+
+async function onCivitaiCopySettingsClick(event) {
+    const { attachment } = getCivitaiMediaFromAction(event.currentTarget);
+    if (!attachment?.civitai) {
+        return;
+    }
+    await copyText(JSON.stringify(attachment.civitai, null, 2));
+    toastr.success('Civitai generation settings copied.');
+}
+
+async function onCivitaiRecreateClick(event) {
+    const { attachment } = getCivitaiMediaFromAction(event.currentTarget);
+    if (!attachment?.civitai) {
+        return;
+    }
+    if (!secret_state[SECRET_KEYS.CIVITAI]) {
+        toastr.error('Configure a Civitai API token before recreating this image.');
+        return;
+    }
+
+    const abortController = new AbortController();
+    const settings = attachment.civitai.settings || {};
+    let body;
+    try {
+        body = await buildCivitaiReplayBody(attachment.civitai, {
+            sameSeed: true,
+            quantity: settings.quantity || 1,
+        });
+    } catch (error) {
+        toastr.error(`Could not recreate this Civitai image: ${error.message}`);
+        return;
+    }
+    const context = getContext();
+    const characterName = context.groupId
+        ? String(context.groupId)
+        : context.characters[context.characterId]?.name;
+    const loaderHandle = loader.show({
+        blocking: false,
+        slug: `${MODULE_NAME}-image-generation`,
+        title: t`Image Generation`,
+        message: t`Recreating Civitai image...`,
+        onStop: () => abortController.abort('Aborted by user'),
+    });
+    try {
+        await sendGenerationRequest(
+            attachment.generation_type ?? generationMode.FREE,
+            attachment.title || attachment.civitai.originalPrompt || '',
+            attachment.negative || '',
+            characterName,
+            null,
+            initiators.command,
+            abortController.signal,
+            {
+                source: sources.civitai,
+                skipPromptProcessing: true,
+                prefixedPrompt: body.prompt,
+                negativePrompt: body.negative_prompt,
+                civitaiBody: body,
+                sourceReference: settings?.source?.reference || '',
+            },
+        );
+    } finally {
+        await loaderHandle.hide();
+    }
+}
+
+async function resumeLastCivitaiGeneration() {
+    const pending = getCivitaiPendingGeneration();
+    if (!pending?.id) {
+        toastr.info('There is no saved Civitai generation to resume.');
+        return;
+    }
+    if (pending.chatId && getCurrentChatId() && pending.chatId !== getCurrentChatId()) {
+        toastr.warning('Open the chat where this Civitai generation started, then press Resume again.');
+        return;
+    }
+    if (civitaiActiveWorkflowId) {
+        toastr.info('A Civitai generation is already being monitored.');
+        return;
+    }
+
+    const abortController = new AbortController();
+    const loaderHandle = loader.show({
+        blocking: false,
+        slug: `${MODULE_NAME}-image-generation`,
+        title: t`Image Generation`,
+        message: t`Resuming Civitai generation...`,
+        onStop: () => abortController.abort('Aborted by user'),
+    });
+    civitaiActiveWorkflowId = pending.id;
+    try {
+        const workflow = await pollCivitaiWorkflow({ id: pending.id, status: 'unassigned', terminal: false }, abortController.signal);
+        const outputs = Array.isArray(workflow.images) ? workflow.images : [];
+        if (!outputs.length) {
+            throw new Error('The resumed workflow contains no downloadable images.');
+        }
+        const metadata = createCivitaiGenerationMetadata(workflow, {
+            originalPrompt: pending.prefixedPrompt || pending.body?.prompt || pending.prompt || '',
+            originalNegativePrompt: pending.body?.negative_prompt || pending.additionalNegativePrefix || '',
+            review: pending.review || null,
+            sourceReference: pending.sourceReference || '',
+        });
+        const filename = pending.characterName
+            ? `${pending.characterName}_${humanizedDateTime()}`
+            : humanizedDateTime();
+        const savedImages = [];
+        const formats = [];
+        for (let index = 0; index < outputs.length; index++) {
+            const output = outputs[index];
+            const outputFilename = outputs.length > 1 ? `${filename}_${index + 1}` : filename;
+            savedImages.push(await saveBase64AsFile(output.image, pending.characterName, outputFilename, output.format || 'png'));
+            formats.push(output.format || 'png');
+        }
+        await sendMessage(
+            pending.prompt || metadata.originalPrompt,
+            savedImages,
+            pending.generationType ?? generationMode.FREE,
+            pending.additionalNegativePrefix || '',
+            pending.initiator || initiators.command,
+            metadata.finalPrompt,
+            formats,
+            metadata,
+        );
+        clearCivitaiPendingGeneration(pending.id);
+        toastr.success('The saved Civitai generation was recovered.', 'Image Generation');
+    } catch (error) {
+        if (!abortController.signal.aborted) {
+            toastr.error(`Could not resume Civitai generation: ${error.message}`);
+        }
+    } finally {
+        civitaiActiveWorkflowId = '';
+        updateCivitaiResumeUi();
+        await loaderHandle.hide();
     }
 }
 
@@ -5535,6 +6450,7 @@ async function sdMessageButton($icon, { animate } = {}) {
     message.extra.media_index = message.extra.media.length - 1;
 
     appendMediaToMessage(message, messageElement, SCROLL_BEHAVIOR.KEEP);
+    addCivitaiMediaActions(messageId);
 
     await context.saveChat();
 }
@@ -5591,15 +6507,29 @@ async function generateMediaSwipe(mediaAttachment, message, onStart, onComplete,
     let loaderHandle = ActionLoaderHandle.EMPTY;
 
     try {
-        const callback = (_a, _b, _c, _d, _e, _f, format) => { result.type = isVideo(format) ? MEDIA_TYPE.VIDEO : MEDIA_TYPE.IMAGE; };
+        const callback = (_a, _b, _c, _d, _e, _f, format, civitai) => {
+            result.type = isVideo(format) ? MEDIA_TYPE.VIDEO : MEDIA_TYPE.IMAGE;
+            if (civitai) {
+                result.civitai = civitai;
+            }
+        };
         const savedPrompt = mediaAttachment.title ?? message.extra.title ?? '';
         const savedNegative = mediaAttachment.negative ?? message.extra.negative ?? '';
-        const refineArgs = {
-            negative: savedNegative,
-            resolution: mediaAttachment.width && mediaAttachment.height ? `${mediaAttachment.width}x${mediaAttachment.height}` : null,
-        };
-        const prompt = await refinePrompt(savedPrompt, refineArgs);
-        dimensions = setTypeSpecificDimensions(generationType, refineArgs.resolution ? mediaAttachment : null);
+        const exactCivitaiReroll = Boolean(mediaAttachment.civitai?.finalPrompt);
+        const refineArgs = exactCivitaiReroll
+            ? { negative: savedNegative, resolution: null }
+            : {
+                negative: savedNegative,
+                resolution: mediaAttachment.width && mediaAttachment.height ? `${mediaAttachment.width}x${mediaAttachment.height}` : null,
+            };
+        const prompt = exactCivitaiReroll ? savedPrompt : await refinePrompt(savedPrompt, refineArgs);
+        const replayBody = exactCivitaiReroll
+            ? await buildCivitaiReplayBody(mediaAttachment.civitai, { sameSeed: false, quantity: 1 })
+            : null;
+        const dimensionSource = exactCivitaiReroll
+            ? { width: mediaAttachment.civitai.settings.width, height: mediaAttachment.civitai.settings.height }
+            : (refineArgs.resolution ? mediaAttachment : null);
+        dimensions = setTypeSpecificDimensions(generationType, dimensionSource);
 
         const context = getContext();
         const characterName = context.groupId
@@ -5616,13 +6546,29 @@ async function generateMediaSwipe(mediaAttachment, message, onStart, onComplete,
         });
 
         onStart();
-        result.url = await sendGenerationRequest(generationType, prompt, refineArgs.negative, characterName, callback, initiators.swipe, abortController.signal);
+        result.url = await sendGenerationRequest(
+            generationType,
+            prompt,
+            refineArgs.negative,
+            characterName,
+            callback,
+            initiators.swipe,
+            abortController.signal,
+            replayBody ? {
+                source: sources.civitai,
+                skipPromptProcessing: true,
+                prefixedPrompt: replayBody.prompt,
+                negativePrompt: replayBody.negative_prompt,
+                civitaiBody: replayBody,
+                sourceReference: mediaAttachment.civitai.settings?.source?.reference || '',
+            } : {},
+        );
         result.generation_type = generationType;
-        result.title = prompt;
+        result.title = savedPrompt || prompt;
         result.negative = refineArgs.negative;
-        if (refineArgs.resolution) {
-            result.width = mediaAttachment.width;
-            result.height = mediaAttachment.height;
+        if (dimensionSource) {
+            result.width = dimensionSource.width;
+            result.height = dimensionSource.height;
         }
     } finally {
         onComplete();
@@ -5648,6 +6594,10 @@ async function generateMediaSwipe(mediaAttachment, message, onStart, onComplete,
  */
 async function onImageSwiped({ message, element, direction }) {
     const { powerUserSettings, accountStorage } = getContext();
+    const messageId = Number(element?.attr?.('mesid'));
+    if (Number.isSafeInteger(messageId)) {
+        setTimeout(() => addCivitaiMediaActions(messageId), 0);
+    }
 
     if (!isValidState()) {
         return;
@@ -6191,9 +7141,30 @@ export async function init() {
     $('#sd_civitai_search_button').on('click', onCivitaiSearchClick);
     $('#sd_civitai_resolve').on('click', onCivitaiResolveClick);
     $('#sd_civitai_loras').on('input', onCivitaiLorasInput);
-    $('#sd_civitai_enhance_prompt').on('input', onCivitaiEnhancePromptInput);
+    $('#sd_civitai_lora_search').on('input', function () {
+        extension_settings.sd.civitai_lora_search = String($(this).val() || '').trim();
+        saveSettingsDebounced();
+    });
+    $('#sd_civitai_lora_search_button').on('click', async () => {
+        try {
+            await onCivitaiLoraSearchClick();
+        } catch (error) {
+            toastr.error(`Could not search Civitai LoRAs: ${error.message}`);
+        }
+    });
+    $('#sd_civitai_trigger_words').on('input', onCivitaiTriggerWordsInput);
+    $('#sd_civitai_prompt_mode').on('change', onCivitaiPromptModeInput);
+    $('#sd_civitai_quantity').on('input', onCivitaiQuantityInput);
+    $('#sd_civitai_max_cost').on('input', onCivitaiMaxCostInput);
+    $('#sd_civitai_source').on('change', onCivitaiSourceInput);
+    $('#sd_civitai_source_upload').on('change', onCivitaiSourceUploadInput);
+    $('#sd_civitai_source_strength').on('input', onCivitaiSourceStrengthInput);
+    $('#sd_civitai_post_process').on('change', onCivitaiPostProcessInput);
     $('#sd_civitai_allow_mature').on('input', onCivitaiMatureInput);
     $('#sd_civitai_preview').on('click', onCivitaiPreviewClick);
+    $('#sd_civitai_resume').on('click', resumeLastCivitaiGeneration);
+    $(document).on('click', '.civitai_copy_settings', onCivitaiCopySettingsClick);
+    $(document).on('click', '.civitai_recreate_exact', onCivitaiRecreateClick);
 
     $('#sd_google_api').on('input', function () {
         extension_settings.sd.google_api = String($(this).val());
@@ -6243,6 +7214,7 @@ export async function init() {
 
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
     eventSource.on(event_types.IMAGE_SWIPED, onImageSwiped);
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, addCivitaiMediaActions);
 
     [event_types.SECRET_WRITTEN, event_types.SECRET_DELETED, event_types.SECRET_ROTATED].forEach(event => {
         eventSource.on(event, async (/** @type {string} */ key) => {
@@ -6265,6 +7237,7 @@ export async function init() {
     });
 
     await loadSettings();
+    getContext().chat?.forEach((_, messageId) => addCivitaiMediaActions(messageId));
     $('body').addClass('sd');
 
     const getMacroValue = ({ isNegative }) => {
