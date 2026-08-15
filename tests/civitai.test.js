@@ -10,6 +10,7 @@ import {
     getCivitaiWorkflowError,
     getCivitaiWorkflowImage,
     getCivitaiWorkflowImages,
+    isCivitaiBaseModelType,
     parseCivitaiAir,
     parseCivitaiLoras,
     parseCivitaiModelReference,
@@ -17,7 +18,7 @@ import {
 
 const SD1_MODEL = 'urn:air:sd1:checkpoint:civitai:4384@128713';
 const SDXL_MODEL = 'urn:air:sdxl:checkpoint:civitai:101055@128078';
-const KREA2_MODEL = 'urn:air:krea2:checkpoint:civitai:30@40';
+const KREA2_MODEL = 'urn:air:krea2:diffusionmodel:civitai:2732656@3072332';
 
 describe('parseCivitaiModelReference', () => {
     test('accepts version IDs and internal version values', () => {
@@ -118,6 +119,16 @@ describe('Civitai built-in models', () => {
         expect(CIVITAI_BUILTIN_MODELS.map(model => model.value)).toEqual(['krea2:raw', 'krea2:turbo']);
         expect(getCivitaiBuiltinModel('KREA2:TURBO')).toMatchObject({ ecosystem: 'krea2', variant: 'turbo' });
         expect(getCivitaiBuiltinModel('version:123')).toBeNull();
+    });
+});
+
+describe('isCivitaiBaseModelType', () => {
+    test('accepts Krea 2 diffusion models without weakening other ecosystems', () => {
+        expect(isCivitaiBaseModelType('krea2', 'diffusionmodel')).toBe(true);
+        expect(isCivitaiBaseModelType('krea2', 'checkpoint')).toBe(true);
+        expect(isCivitaiBaseModelType('sdxl', 'checkpoint')).toBe(true);
+        expect(isCivitaiBaseModelType('sdxl', 'diffusionmodel')).toBe(false);
+        expect(isCivitaiBaseModelType('krea2', 'lora')).toBe(false);
     });
 });
 
@@ -304,6 +315,25 @@ describe('buildCivitaiWorkflow', () => {
     });
 
     test('supports a custom Krea 2 diffusion model and Krea 2 Edit with LoRAs', () => {
+        const createWorkflow = buildCivitaiWorkflow({
+            model: KREA2_MODEL,
+            ecosystem: 'krea2',
+            prompt: 'editorial portrait',
+            width: 1024,
+            height: 1024,
+            cfgScale: 4,
+            steps: 20,
+            quantity: 1,
+            externalId: 'test-krea-diffusion-model',
+        });
+        expect(createWorkflow.steps[0].input).toMatchObject({
+            engine: 'comfy',
+            ecosystem: 'krea2',
+            model: 'raw',
+            operation: 'createImage',
+            diffusionModel: KREA2_MODEL,
+        });
+
         const workflow = buildCivitaiWorkflow({
             model: KREA2_MODEL,
             ecosystem: 'krea2',
