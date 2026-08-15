@@ -3,6 +3,7 @@ import { describe, expect, test } from '@jest/globals';
 import {
     buildCivitaiWorkflow,
     flattenCivitaiModels,
+    getCivitaiPromptEnhancement,
     getCivitaiWorkflowError,
     getCivitaiWorkflowImage,
     parseCivitaiAir,
@@ -159,6 +160,34 @@ describe('buildCivitaiWorkflow', () => {
         expect(workflow.steps[0].input.clipSkip).toBeUndefined();
     });
 
+    test('chains Civitai prompt enhancement into image generation', () => {
+        const workflow = buildCivitaiWorkflow({
+            model: SDXL_MODEL,
+            ecosystem: 'sdxl',
+            prompt: 'anime character with sword',
+            negativePrompt: 'blurry',
+            width: 1024,
+            height: 1024,
+            cfgScale: 7,
+            steps: 25,
+            enhancePrompt: true,
+            externalId: 'test-enhanced-1',
+        });
+
+        expect(workflow.steps[0]).toEqual({
+            $type: 'promptEnhancement',
+            name: 'enhance',
+            input: {
+                ecosystem: 'sdxl',
+                prompt: 'anime character with sword',
+                negativePrompt: 'blurry',
+            },
+        });
+        expect(workflow.steps[1].name).toBe('generate');
+        expect(workflow.steps[1].input.prompt).toEqual({ $ref: 'enhance', path: 'output.enhancedPrompt' });
+        expect(workflow.steps[1].input.negativePrompt).toEqual({ $ref: 'enhance', path: 'output.enhancedNegativePrompt' });
+    });
+
     test('rejects unsupported ecosystems and invalid dimensions', () => {
         expect(() => buildCivitaiWorkflow({
             model: 'urn:air:flux1:checkpoint:civitai:1@2',
@@ -198,5 +227,26 @@ describe('workflow result helpers', () => {
             steps: [{ output: { errors: ['Prompt blocked'] } }],
         });
         expect(message).toBe('Prompt blocked');
+    });
+
+    test('extracts enhanced prompts and recommendations', () => {
+        const enhancement = getCivitaiPromptEnhancement({
+            steps: [{
+                $type: 'promptEnhancement',
+                output: {
+                    enhancedPrompt: 'masterpiece, detailed character',
+                    enhancedNegativePrompt: 'blurry, low quality',
+                    issues: [{ severity: 'warning', description: 'Prompt was vague.' }],
+                    recommendations: ['Add lighting details.'],
+                },
+            }],
+        });
+
+        expect(enhancement).toEqual({
+            prompt: 'masterpiece, detailed character',
+            negativePrompt: 'blurry, low quality',
+            issues: [{ severity: 'warning', description: 'Prompt was vague.' }],
+            recommendations: ['Add lighting details.'],
+        });
     });
 });

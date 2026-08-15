@@ -9,6 +9,7 @@ import {
     buildCivitaiWorkflow,
     CIVITAI_TERMINAL_STATUSES,
     flattenCivitaiModels,
+    getCivitaiPromptEnhancement,
     getCivitaiWorkflowError,
     getCivitaiWorkflowImage,
     parseCivitaiAir,
@@ -198,6 +199,7 @@ async function prepareWorkflow(token, body, purpose) {
         clipSkip: Number(body?.clip_skip),
         seed: body?.seed === undefined ? undefined : Number(body.seed),
         loras: Object.fromEntries(resolvedLoras),
+        enhancePrompt: body?.enhance_prompt === true,
         allowMatureContent: body?.allow_mature === true,
         // Never reuse a what-if external ID for a real submission.
         externalId: `sillytavern-${purpose}-${crypto.randomUUID()}`,
@@ -271,6 +273,7 @@ function summarizeWorkflow(workflow) {
         status,
         terminal: CIVITAI_TERMINAL_STATUSES.has(status),
         cost: workflow?.cost ?? null,
+        enhancement: getCivitaiPromptEnhancement(workflow),
         error: status === 'succeeded' ? null : (CIVITAI_TERMINAL_STATUSES.has(status) ? getCivitaiWorkflowError(workflow) : null),
     };
 }
