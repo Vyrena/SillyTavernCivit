@@ -141,6 +141,25 @@ declare global {
         negative?: string;
         width?: number;
         height?: number;
+        /** Replay-safe metadata for images generated through Civitai. */
+        civitai?: CivitaiGenerationMetadata;
+    }
+
+    interface CivitaiGenerationMetadata {
+        version: number;
+        workflowId: string;
+        outputIndex?: number;
+        cost?: Record<string, unknown> | null;
+        transactions?: Record<string, unknown> | null;
+        model?: Record<string, unknown> | null;
+        loras?: Record<string, unknown>[];
+        originalPrompt: string;
+        originalNegativePrompt: string;
+        finalPrompt: string;
+        finalNegativePrompt: string;
+        enhancement?: Record<string, unknown> | null;
+        settings: Record<string, any>;
+        warnings?: string[];
     }
 
     interface ImageCaptionAttachmentProps {

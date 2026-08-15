@@ -1,4 +1,5 @@
 const AIR_PATTERN = /^urn:air:([a-z0-9_\-/]+):([a-z0-9_\-/]+):civitai:(\d+)@(\d+)(?:\+\d+)?(?:\.[a-z0-9_-]+)?$/i;
+const CIVITAI_HOST_PATTERN = /^(?:www\.)?civitai\.(?:com|red|green)$/i;
 
 export const CIVITAI_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'expired', 'canceled']);
 
@@ -67,8 +68,8 @@ export function parseCivitaiModelReference(value) {
     }
 
     const hostname = url.hostname.toLowerCase();
-    if (hostname !== 'civitai.com' && hostname !== 'www.civitai.com') {
-        throw new Error('Model URLs must use civitai.com.');
+    if (!CIVITAI_HOST_PATTERN.test(hostname)) {
+        throw new Error('Model URLs must use an official civitai.com, civitai.red, or civitai.green domain.');
     }
 
     const queryVersionId = url.searchParams.get('modelVersionId');
@@ -181,6 +182,52 @@ export function flattenCivitaiModels(payload) {
 }
 
 /**
+ * Flatten Civitai LoRA-search results for the Android-friendly browser.
+ * @param {unknown} payload Civitai models response.
+ * @returns {{value: string, text: string, modelId: number, versionId: number, baseModel: string, preview: string, trainedWords: string[]}[]}
+ */
+export function flattenCivitaiLoras(payload) {
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const loras = [];
+
+    for (const model of items) {
+        if (String(model?.type).toLowerCase() !== 'lora' || model?.supportsGeneration === false) {
+            continue;
+        }
+
+        const versions = Array.isArray(model?.modelVersions) ? model.modelVersions : [];
+        for (const version of versions.filter(item => item?.supportsGeneration !== false).slice(0, 3)) {
+            const versionId = Number(version?.id);
+            const modelId = Number(model?.id);
+            if (!Number.isSafeInteger(versionId) || !Number.isSafeInteger(modelId)) {
+                continue;
+            }
+
+            const modelName = String(model?.name || `LoRA ${modelId}`);
+            const versionName = String(version?.name || `Version ${versionId}`);
+            const baseModel = String(version?.baseModel || 'Unknown base');
+            const images = Array.isArray(version?.images) ? version.images : [];
+            const preview = String(images.find(image => typeof image?.url === 'string')?.url || '');
+            const trainedWords = Array.isArray(version?.trainedWords)
+                ? version.trainedWords.map(String).map(word => word.trim()).filter(Boolean).slice(0, 20)
+                : [];
+
+            loras.push({
+                value: `version:${versionId}`,
+                text: `${modelName} — ${versionName}`,
+                modelId,
+                versionId,
+                baseModel,
+                preview,
+                trainedWords,
+            });
+        }
+    }
+
+    return loras;
+}
+
+/**
  * Build a Civitai image-generation workflow.
  * @param {object} params Image-generation parameters.
  * @param {string} params.model Canonical checkpoint AIR.
@@ -196,6 +243,10 @@ export function flattenCivitaiModels(payload) {
  * @param {number} [params.clipSkip] CLIP skip.
  * @param {number} [params.seed] Seed.
  * @param {Record<string, number>} [params.loras] LoRA AIRs and strengths.
+ * @param {number} [params.quantity] Number of images to generate.
+ * @param {string} [params.sourceImage] Data URL, Base64 string, or public URL for img2img.
+ * @param {number} [params.strength] Img2img denoising strength.
+ * @param {'none'|'upscale'|'remove-background'} [params.postProcess] Optional finishing step.
  * @param {boolean} [params.enhancePrompt] Rewrite prompts with Civitai before generation.
  * @param {boolean} [params.allowMatureContent] Allow mature outputs.
  * @param {string} params.externalId Unique idempotency key.
@@ -232,7 +283,7 @@ export function buildCivitaiWorkflow(params) {
         height,
         cfgScale: validateNumber(params.cfgScale, 'CFG scale', 0, 30),
         steps: validateInteger(params.steps, 'Sampling steps', 1, 150),
-        quantity: 1,
+        quantity: validateInteger(params.quantity ?? 1, 'Quantity', 1, 12),
     };
 
     if (params.sampler && params.sampler !== 'N/A') {
@@ -261,8 +312,23 @@ export function buildCivitaiWorkflow(params) {
         input.loras = params.loras;
     }
 
-    const imageStep = { $type: 'imageGen', input };
-    const steps = [imageStep];
+    const imageStep = { $type: 'imageGen', name: 'generate', input };
+    const steps = [];
+
+    const sourceImage = String(params.sourceImage || '').trim();
+    if (sourceImage) {
+        steps.push({
+            $type: 'convertImage',
+            name: 'source-image',
+            input: {
+                image: sourceImage,
+                output: { format: 'png', hideMetadata: true },
+            },
+        });
+        input.operation = 'createVariant';
+        input.image = { $ref: 'source-image', path: 'output.blob.url' };
+        input.strength = validateNumber(params.strength ?? 0.7, 'Image-to-image strength', 0, 1);
+    }
 
     if (params.enhancePrompt) {
         const enhancementInput = {
@@ -274,15 +340,38 @@ export function buildCivitaiWorkflow(params) {
             enhancementInput.negativePrompt = input.negativePrompt;
         }
 
-        steps.unshift({
+        steps.push({
             $type: 'promptEnhancement',
             name: 'enhance',
             input: enhancementInput,
         });
-        imageStep.name = 'generate';
         input.prompt = { $ref: 'enhance', path: 'output.enhancedPrompt' };
         if (input.negativePrompt) {
             input.negativePrompt = { $ref: 'enhance', path: 'output.enhancedNegativePrompt' };
+        }
+    }
+
+    steps.push(imageStep);
+
+    const postProcess = String(params.postProcess || 'none');
+    if (!['none', 'upscale', 'remove-background'].includes(postProcess)) {
+        throw new Error(`Unsupported Civitai post-processing mode "${postProcess}".`);
+    }
+
+    if (postProcess !== 'none') {
+        for (let index = 0; index < input.quantity; index++) {
+            const imageReference = { $ref: 'generate', path: `output.images[${index}].url` };
+            steps.push(postProcess === 'upscale'
+                ? {
+                    $type: 'imageUpscaler',
+                    name: `post-${index}`,
+                    input: { image: imageReference, numberOfRepeats: 1 },
+                }
+                : {
+                    $type: 'imageBackgroundRemoval',
+                    name: `post-${index}`,
+                    input: { image: imageReference, format: 'png' },
+                });
         }
     }
 
@@ -290,9 +379,48 @@ export function buildCivitaiWorkflow(params) {
         steps,
         allowMatureContent: Boolean(params.allowMatureContent),
         tags: ['sillytavern', 'image-generation'],
-        metadata: { client: 'SillyTavern', source: 'native-image-generation' },
+        metadata: {
+            client: 'SillyTavern',
+            source: 'native-image-generation',
+            outputStepNames: postProcess === 'none'
+                ? ['generate']
+                : Array.from({ length: input.quantity }, (_, index) => `post-${index}`),
+        },
         externalId: params.externalId,
     };
+}
+
+/**
+ * Extract all final deliverable images from a workflow.
+ * @param {unknown} workflow Civitai workflow.
+ * @returns {{url: string, id: string}[]}
+ */
+export function getCivitaiWorkflowImages(workflow) {
+    const steps = Array.isArray(workflow?.steps) ? workflow.steps : [];
+    const requestedNames = Array.isArray(workflow?.metadata?.outputStepNames)
+        ? workflow.metadata.outputStepNames.map(String)
+        : [];
+    const outputSteps = requestedNames.length > 0
+        ? requestedNames.map(name => steps.find(step => String(step?.name) === name)).filter(Boolean)
+        : steps.filter(step => String(step?.name || '').startsWith('post-'));
+
+    if (outputSteps.length > 0) {
+        return outputSteps.flatMap(step => {
+            const images = Array.isArray(step?.output?.images) ? step.output.images : [];
+            const candidates = [step?.output?.blob, step?.output?.image]
+                .filter(Boolean);
+            return [...images, ...candidates]
+                .filter(item => item?.available !== false && typeof item?.url === 'string' && item.url)
+                .map(item => ({ url: item.url, id: String(item.id || '') }));
+        });
+    }
+
+    const imageStep = steps.find(step => String(step?.name) === 'generate' && Array.isArray(step?.output?.images))
+        ?? steps.find(step => Array.isArray(step?.output?.images));
+    const images = Array.isArray(imageStep?.output?.images) ? imageStep.output.images : [];
+    return images
+        .filter(item => item?.available !== false && typeof item?.url === 'string' && item.url)
+        .map(item => ({ url: item.url, id: String(item.id || '') }));
 }
 
 /**
@@ -301,15 +429,7 @@ export function buildCivitaiWorkflow(params) {
  * @returns {{url: string, id: string}|null}
  */
 export function getCivitaiWorkflowImage(workflow) {
-    const steps = Array.isArray(workflow?.steps) ? workflow.steps : [];
-    for (const step of steps) {
-        const images = Array.isArray(step?.output?.images) ? step.output.images : [];
-        const image = images.find(item => item?.available !== false && typeof item?.url === 'string' && item.url);
-        if (image) {
-            return { url: image.url, id: String(image.id || '') };
-        }
-    }
-    return null;
+    return getCivitaiWorkflowImages(workflow)[0] ?? null;
 }
 
 /**

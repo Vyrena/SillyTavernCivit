@@ -87,3 +87,75 @@
     top: 0;
     transform: translateX(-50%);
 }
+
+.sd_civitai_lora_results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 6px;
+    max-height: 310px;
+    margin-top: 6px;
+    overflow-y: auto;
+}
+
+.sd_civitai_lora_card {
+    display: flex;
+    min-width: 0;
+    padding: 5px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 80%, transparent);
+    flex-direction: column;
+    gap: 4px;
+}
+
+.sd_civitai_lora_card img {
+    width: 100%;
+    height: 105px;
+    border-radius: 4px;
+    object-fit: cover;
+}
+
+.sd_civitai_lora_card_name {
+    min-height: 2.4em;
+    font-size: 0.85em;
+    line-height: 1.2;
+    overflow: hidden;
+}
+
+.sd_civitai_lora_chips {
+    display: flex;
+    margin-top: 6px;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.sd_civitai_lora_chip {
+    display: grid;
+    padding: 5px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    grid-template-columns: minmax(90px, 1fr) minmax(90px, 1fr) auto auto;
+    gap: 5px;
+    align-items: center;
+}
+
+.sd_civitai_lora_chip_name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.civitai_media_action {
+    color: var(--SmartThemeBodyColor);
+}
+
+@media (max-width: 600px) {
+    .sd_civitai_lora_chip {
+        grid-template-columns: 1fr auto auto;
+    }
+
+    .sd_civitai_lora_chip input[type="range"] {
+        grid-column: 1 / -1;
+        grid-row: 2;
+    }
+}

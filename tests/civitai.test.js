@@ -2,10 +2,12 @@ import { describe, expect, test } from '@jest/globals';
 
 import {
     buildCivitaiWorkflow,
+    flattenCivitaiLoras,
     flattenCivitaiModels,
     getCivitaiPromptEnhancement,
     getCivitaiWorkflowError,
     getCivitaiWorkflowImage,
+    getCivitaiWorkflowImages,
     parseCivitaiAir,
     parseCivitaiLoras,
     parseCivitaiModelReference,
@@ -24,6 +26,11 @@ describe('parseCivitaiModelReference', () => {
         expect(parseCivitaiModelReference('https://civitai.com/models/4384?modelVersionId=128713')).toEqual({ versionId: 128713 });
         expect(parseCivitaiModelReference('https://civitai.com/api/v1/model-versions/128713')).toEqual({ versionId: 128713 });
         expect(parseCivitaiModelReference('https://civitai.com/models/4384')).toEqual({ modelId: 4384 });
+    });
+
+    test('accepts official Civitai red and green aliases', () => {
+        expect(parseCivitaiModelReference('https://civitai.red/models/4384?modelVersionId=128713')).toEqual({ versionId: 128713 });
+        expect(parseCivitaiModelReference('https://www.civitai.green/models/4384')).toEqual({ modelId: 4384 });
     });
 
     test('accepts canonical AIRs', () => {
@@ -99,6 +106,34 @@ describe('flattenCivitaiModels', () => {
             modelId: 1,
             versionId: 2,
             baseModel: 'SDXL 1.0',
+        }]);
+    });
+});
+
+describe('flattenCivitaiLoras', () => {
+    test('returns visual LoRA cards with trigger words', () => {
+        expect(flattenCivitaiLoras({
+            items: [{
+                id: 10,
+                name: 'Style helper',
+                type: 'LORA',
+                supportsGeneration: true,
+                modelVersions: [{
+                    id: 20,
+                    name: 'v1',
+                    baseModel: 'Illustrious',
+                    trainedWords: ['style trigger'],
+                    images: [{ url: 'https://example.com/preview.jpg' }],
+                }],
+            }],
+        })).toEqual([{
+            value: 'version:20',
+            text: 'Style helper — v1',
+            modelId: 10,
+            versionId: 20,
+            baseModel: 'Illustrious',
+            preview: 'https://example.com/preview.jpg',
+            trainedWords: ['style trigger'],
         }]);
     });
 });
@@ -188,6 +223,39 @@ describe('buildCivitaiWorkflow', () => {
         expect(workflow.steps[1].input.negativePrompt).toEqual({ $ref: 'enhance', path: 'output.enhancedNegativePrompt' });
     });
 
+    test('builds batched img2img with one finishing step per output', () => {
+        const workflow = buildCivitaiWorkflow({
+            model: SDXL_MODEL,
+            ecosystem: 'sdxl',
+            prompt: 'restyle this character',
+            negativePrompt: 'blurry',
+            width: 1024,
+            height: 1024,
+            cfgScale: 7,
+            steps: 25,
+            seed: 42,
+            quantity: 2,
+            sourceImage: 'data:image/png;base64,AAAA',
+            strength: 0.65,
+            postProcess: 'remove-background',
+            externalId: 'test-variant-1',
+        });
+
+        expect(workflow.steps[0]).toMatchObject({ $type: 'convertImage', name: 'source-image' });
+        expect(workflow.steps[1]).toMatchObject({
+            $type: 'imageGen',
+            name: 'generate',
+            input: {
+                operation: 'createVariant',
+                image: { $ref: 'source-image', path: 'output.blob.url' },
+                strength: 0.65,
+                quantity: 2,
+            },
+        });
+        expect(workflow.steps.slice(2).map(step => step.name)).toEqual(['post-0', 'post-1']);
+        expect(workflow.metadata.outputStepNames).toEqual(['post-0', 'post-1']);
+    });
+
     test('rejects unsupported ecosystems and invalid dimensions', () => {
         expect(() => buildCivitaiWorkflow({
             model: 'urn:air:flux1:checkpoint:civitai:1@2',
@@ -219,6 +287,20 @@ describe('workflow result helpers', () => {
             steps: [{ output: { images: [{ id: 'blob_1', available: true, url: 'https://example.com/image.png' }] } }],
         });
         expect(image).toEqual({ id: 'blob_1', url: 'https://example.com/image.png' });
+    });
+
+    test('extracts every post-processed batch output in order', () => {
+        const images = getCivitaiWorkflowImages({
+            metadata: { outputStepNames: ['post-0', 'post-1'] },
+            steps: [
+                { name: 'post-1', output: { image: { id: 'two', url: 'https://example.com/two.png' } } },
+                { name: 'post-0', output: { blob: { id: 'one', url: 'https://example.com/one.png' } } },
+            ],
+        });
+        expect(images).toEqual([
+            { id: 'one', url: 'https://example.com/one.png' },
+            { id: 'two', url: 'https://example.com/two.png' },
+        ]);
     });
 
     test('extracts readable step errors', () => {
