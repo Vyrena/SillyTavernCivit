@@ -150,7 +150,8 @@
                         <span>Resolve</span>
                     </div>
                 </div>
-                <small id="sd_civitai_model_status">Select a search result below or paste any runnable SD1/SDXL checkpoint.</small>
+                <small id="sd_civitai_model_status">Select Krea 2 Raw/Turbo, a search result, or paste a runnable SD1/SDXL/Krea 2 checkpoint.</small>
+                <small id="sd_civitai_krea_notice" style="display: none;">Krea 2 uses Civitai's Comfy pipeline and supports compatible community Krea 2 LoRAs. Recommended settings: Raw 20 steps / CFG 4, Turbo 8 / 1, Edit 10 / 1. Pasted community checkpoints use Raw; a source image switches to Edit mode.</small>
 
                 <label for="sd_civitai_lora_search" class="marginTop5">Browse compatible LoRAs</label>
                 <div class="flex-container flexnowrap">
@@ -199,8 +200,10 @@
                     <option value="upload">Upload an image</option>
                 </select>
                 <input id="sd_civitai_source_upload" type="file" class="text_pole marginTop5" accept="image/*" />
-                <label for="sd_civitai_source_strength">Reference strength: <span id="sd_civitai_source_strength_value"></span></label>
-                <input id="sd_civitai_source_strength" type="range" min="0" max="1" step="0.05" />
+                <div id="sd_civitai_source_strength_control">
+                    <label for="sd_civitai_source_strength">Reference strength: <span id="sd_civitai_source_strength_value"></span></label>
+                    <input id="sd_civitai_source_strength" type="range" min="0" max="1" step="0.05" />
+                </div>
                 <small id="sd_civitai_source_status">Higher values change more of the source image.</small>
 
                 <label for="sd_civitai_post_process" class="marginTop5">Post-processing</label>

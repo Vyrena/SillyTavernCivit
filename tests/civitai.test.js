@@ -2,8 +2,10 @@ import { describe, expect, test } from '@jest/globals';
 
 import {
     buildCivitaiWorkflow,
+    CIVITAI_BUILTIN_MODELS,
     flattenCivitaiLoras,
     flattenCivitaiModels,
+    getCivitaiBuiltinModel,
     getCivitaiPromptEnhancement,
     getCivitaiWorkflowError,
     getCivitaiWorkflowImage,
@@ -15,6 +17,7 @@ import {
 
 const SD1_MODEL = 'urn:air:sd1:checkpoint:civitai:4384@128713';
 const SDXL_MODEL = 'urn:air:sdxl:checkpoint:civitai:101055@128078';
+const KREA2_MODEL = 'urn:air:krea2:checkpoint:civitai:30@40';
 
 describe('parseCivitaiModelReference', () => {
     test('accepts version IDs and internal version values', () => {
@@ -107,6 +110,14 @@ describe('flattenCivitaiModels', () => {
             versionId: 2,
             baseModel: 'SDXL 1.0',
         }]);
+    });
+});
+
+describe('Civitai built-in models', () => {
+    test('exposes Krea 2 Raw and Turbo choices', () => {
+        expect(CIVITAI_BUILTIN_MODELS.map(model => model.value)).toEqual(['krea2:raw', 'krea2:turbo']);
+        expect(getCivitaiBuiltinModel('KREA2:TURBO')).toMatchObject({ ecosystem: 'krea2', variant: 'turbo' });
+        expect(getCivitaiBuiltinModel('version:123')).toBeNull();
     });
 });
 
@@ -256,6 +267,90 @@ describe('buildCivitaiWorkflow', () => {
         expect(workflow.metadata.outputStepNames).toEqual(['post-0', 'post-1']);
     });
 
+    test('builds Krea 2 Raw with mapped Comfy controls and community LoRAs', () => {
+        const workflow = buildCivitaiWorkflow({
+            model: 'krea2:raw',
+            ecosystem: 'krea2',
+            prompt: 'editorial portrait',
+            negativePrompt: 'blurry',
+            width: 1024,
+            height: 1024,
+            cfgScale: 4,
+            steps: 20,
+            sampler: 'dpm++2m',
+            scheduler: 'discrete',
+            seed: 42,
+            quantity: 2,
+            loras: { 'urn:air:krea2:lora:civitai:10@20': 0.8 },
+            externalId: 'test-krea-raw',
+        });
+
+        expect(workflow.steps[0].input).toMatchObject({
+            engine: 'comfy',
+            ecosystem: 'krea2',
+            model: 'raw',
+            operation: 'createImage',
+            prompt: 'editorial portrait',
+            negativePrompt: 'blurry',
+            sampler: 'dpmpp_2m',
+            scheduler: 'normal',
+            cfgScale: 4,
+            steps: 20,
+            seed: 42,
+            quantity: 2,
+            loras: { 'urn:air:krea2:lora:civitai:10@20': 0.8 },
+        });
+        expect(workflow.steps[0].input.diffusionModel).toBeUndefined();
+    });
+
+    test('supports a custom Krea 2 diffusion model and Krea 2 Edit with LoRAs', () => {
+        const workflow = buildCivitaiWorkflow({
+            model: KREA2_MODEL,
+            ecosystem: 'krea2',
+            kreaVariant: 'turbo',
+            prompt: 'turn this into a comic cover',
+            negativePrompt: 'text artifacts',
+            width: 1024,
+            height: 1536,
+            cfgScale: 1,
+            steps: 8,
+            sampler: 'euler_a',
+            scheduler: 'karras',
+            quantity: 4,
+            sourceImage: 'data:image/png;base64,AAAA',
+            strength: 0.25,
+            loras: { 'urn:air:krea2:lora:civitai:10@20': 1 },
+            externalId: 'test-krea-edit',
+        });
+
+        expect(workflow.steps[0]).toMatchObject({ $type: 'convertImage', name: 'source-image' });
+        expect(workflow.steps[1].input).toMatchObject({
+            engine: 'comfy',
+            ecosystem: 'krea2',
+            model: 'edit',
+            operation: 'editImage',
+            diffusionModel: KREA2_MODEL,
+            images: [{ $ref: 'source-image', path: 'output.blob.url' }],
+            sampler: 'euler_ancestral',
+            scheduler: 'karras',
+            quantity: 4,
+        });
+        expect(workflow.steps[1].input.strength).toBeUndefined();
+
+        expect(() => buildCivitaiWorkflow({
+            model: 'krea2:raw',
+            ecosystem: 'krea2',
+            prompt: 'edit',
+            width: 1024,
+            height: 1024,
+            cfgScale: 1,
+            steps: 8,
+            quantity: 5,
+            sourceImage: 'data:image/png;base64,AAAA',
+            externalId: 'too-many-edits',
+        })).toThrow('1 to 4');
+    });
+
     test('rejects unsupported ecosystems and invalid dimensions', () => {
         expect(() => buildCivitaiWorkflow({
             model: 'urn:air:flux1:checkpoint:civitai:1@2',
@@ -266,7 +361,7 @@ describe('buildCivitaiWorkflow', () => {
             cfgScale: 1,
             steps: 4,
             externalId: 'test',
-        })).toThrow('currently supports SD1 and SDXL');
+        })).toThrow('supports SD1, SDXL, and Krea 2');
 
         expect(() => buildCivitaiWorkflow({
             model: SD1_MODEL,

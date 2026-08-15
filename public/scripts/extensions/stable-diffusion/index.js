@@ -614,6 +614,7 @@ async function loadSettings() {
     $('#sd_civitai_post_process').val(extension_settings.sd.civitai_post_process);
     $('#sd_civitai_allow_mature').prop('checked', extension_settings.sd.civitai_allow_mature);
     renderCivitaiLoraChips();
+    updateCivitaiModelSpecificUi();
     updateCivitaiResumeUi();
     $('#sd_google_api').val(extension_settings.sd.google_api);
     $('#sd_google_enhance').prop('checked', extension_settings.sd.google_enhance);
@@ -1386,10 +1387,36 @@ function onBflUpsamplingInput() {
     saveSettingsDebounced();
 }
 
+function isCivitaiKrea2Model(reference = extension_settings.sd.civitai_model) {
+    const value = String(reference || '').trim().toLowerCase();
+    const baseModel = String(extension_settings.sd.civitai_model_base || '').trim().toLowerCase();
+    return value.startsWith('krea2:') || value.startsWith('urn:air:krea2:') || baseModel === 'krea 2';
+}
+
+function updateCivitaiModelSpecificUi() {
+    const isKrea2 = isCivitaiKrea2Model();
+    const sourceEnabled = extension_settings.sd.civitai_source !== 'none';
+    const maximumQuantity = isKrea2 && sourceEnabled ? 4 : 12;
+    $('#sd_civitai_krea_notice').toggle(isKrea2);
+    $('#sd_civitai_source_strength_control').toggle(!isKrea2);
+    $('#sd_civitai_quantity').attr('max', maximumQuantity);
+    if (Number(extension_settings.sd.civitai_quantity) > maximumQuantity) {
+        extension_settings.sd.civitai_quantity = maximumQuantity;
+        $('#sd_civitai_quantity').val(maximumQuantity);
+    }
+    if (isKrea2 && sourceEnabled) {
+        $('#sd_civitai_source_status').text('Krea 2 Edit follows the prompt instead of a strength value and supports up to 4 outputs.');
+    } else {
+        $('#sd_civitai_source_status').text(isKrea2
+            ? 'Krea 2 Raw/Turbo supports compatible community LoRAs and exact seeded rerolls.'
+            : 'Higher values change more of the source image.');
+    }
+}
+
 function onCivitaiModelInput() {
     const model = String($('#sd_civitai_model').val() || '').trim();
     extension_settings.sd.civitai_model = model;
-    extension_settings.sd.civitai_model_base = '';
+    extension_settings.sd.civitai_model_base = model.toLowerCase().startsWith('krea2:') ? 'Krea 2' : '';
 
     if (extension_settings.sd.source === sources.civitai) {
         extension_settings.sd.model = model;
@@ -1402,6 +1429,7 @@ function onCivitaiModelInput() {
 
     $('#sd_civitai_model_status').empty();
     $('#sd_civitai_cost').empty();
+    updateCivitaiModelSpecificUi();
     saveSettingsDebounced();
 }
 
@@ -1431,7 +1459,8 @@ function onCivitaiTriggerWordsInput() {
 }
 
 function onCivitaiQuantityInput() {
-    extension_settings.sd.civitai_quantity = clamp(Number($('#sd_civitai_quantity').val()) || 1, 1, 12);
+    const maximumQuantity = Number($('#sd_civitai_quantity').attr('max')) || 12;
+    extension_settings.sd.civitai_quantity = clamp(Number($('#sd_civitai_quantity').val()) || 1, 1, maximumQuantity);
     $('#sd_civitai_quantity').val(extension_settings.sd.civitai_quantity);
     $('#sd_civitai_cost').empty();
     saveSettingsDebounced();
@@ -1447,6 +1476,7 @@ function onCivitaiSourceInput() {
     extension_settings.sd.civitai_source = ['none', 'character', 'previous', 'upload'].includes(source) ? source : 'none';
     $('#sd_civitai_source_upload').toggle(extension_settings.sd.civitai_source === 'upload');
     $('#sd_civitai_cost').empty();
+    updateCivitaiModelSpecificUi();
     saveSettingsDebounced();
 }
 
@@ -1484,7 +1514,9 @@ async function onCivitaiSourceUploadInput(event) {
     civitaiUploadedSourceImage = await getBase64Async(file);
     civitaiUploadedSourceName = file.name;
     civitaiUploadedSourceUrl = '';
-    $('#sd_civitai_source_status').text(`${file.name} is ready. Higher strength changes more of it.`);
+    $('#sd_civitai_source_status').text(isCivitaiKrea2Model()
+        ? `${file.name} is ready for Krea 2 Edit mode.`
+        : `${file.name} is ready. Higher strength changes more of it.`);
 }
 
 function onCivitaiPostProcessInput() {
@@ -1607,6 +1639,7 @@ async function onCivitaiLoraSearchClick() {
         extension_settings.sd.civitai_model = resource.air;
         extension_settings.sd.civitai_model_base = resource.baseModel || '';
         $('#sd_civitai_model').val(resource.air);
+        updateCivitaiModelSpecificUi();
         saveSettingsDebounced();
     }
     const result = await fetch('/api/sd/civitai/loras', {
@@ -1652,6 +1685,7 @@ async function onCivitaiResolveClick() {
         extension_settings.sd.model = resource.air;
         extension_settings.sd.civitai_model_base = resource.baseModel || '';
         $('#sd_civitai_model').val(resource.air);
+        updateCivitaiModelSpecificUi();
         const warnings = Array.isArray(resource.warnings) ? resource.warnings : [];
         $('#sd_civitai_model_status').text(`${resource.name} (${resource.ecosystem.toUpperCase()})${warnings.length ? ` — ${warnings.join(' ')}` : ''}`);
         await loadModels();
@@ -1871,8 +1905,10 @@ async function onModelChange() {
 
     if (extension_settings.sd.source === sources.civitai) {
         extension_settings.sd.civitai_model = String(extension_settings.sd.model || '');
+        extension_settings.sd.civitai_model_base = extension_settings.sd.civitai_model.toLowerCase().startsWith('krea2:') ? 'Krea 2' : '';
         $('#sd_civitai_model').val(extension_settings.sd.civitai_model);
         $('#sd_civitai_model_status').empty();
+        updateCivitaiModelSpecificUi();
     }
 
     saveSettingsDebounced();
