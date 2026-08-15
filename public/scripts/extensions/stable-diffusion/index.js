@@ -369,6 +369,7 @@ const defaultSettings = {
     civitai_model: '',
     civitai_search: '',
     civitai_loras: '',
+    civitai_enhance_prompt: false,
     civitai_allow_mature: false,
 
     // Google settings
@@ -575,6 +576,7 @@ async function loadSettings() {
     $('#sd_civitai_model').val(extension_settings.sd.civitai_model);
     $('#sd_civitai_search').val(extension_settings.sd.civitai_search);
     $('#sd_civitai_loras').val(extension_settings.sd.civitai_loras);
+    $('#sd_civitai_enhance_prompt').prop('checked', extension_settings.sd.civitai_enhance_prompt);
     $('#sd_civitai_allow_mature').prop('checked', extension_settings.sd.civitai_allow_mature);
     $('#sd_google_api').val(extension_settings.sd.google_api);
     $('#sd_google_enhance').prop('checked', extension_settings.sd.google_enhance);
@@ -1373,6 +1375,12 @@ function onCivitaiLorasInput() {
     saveSettingsDebounced();
 }
 
+function onCivitaiEnhancePromptInput() {
+    extension_settings.sd.civitai_enhance_prompt = !!$('#sd_civitai_enhance_prompt').prop('checked');
+    $('#sd_civitai_cost').empty();
+    saveSettingsDebounced();
+}
+
 function onCivitaiMatureInput() {
     extension_settings.sd.civitai_allow_mature = !!$('#sd_civitai_allow_mature').prop('checked');
     saveSettingsDebounced();
@@ -1422,7 +1430,8 @@ async function onCivitaiPreviewClick() {
         const data = await result.json();
         const total = Number(data?.cost?.total);
         const cost = Number.isFinite(total) ? `${total} Buzz` : 'Cost unavailable';
-        $('#sd_civitai_cost').text(cost);
+        const detail = extension_settings.sd.civitai_enhance_prompt ? `${cost} including prompt enhancement` : cost;
+        $('#sd_civitai_cost').text(detail);
         toastr.info(cost, 'Civitai cost preview');
     } catch (error) {
         $('#sd_civitai_cost').text('Preview failed');
@@ -3611,10 +3620,11 @@ async function sendGenerationRequest(generationType, prompt, additionalNegativeP
     }
 
     const filename = characterName ? `${characterName}_${humanizedDateTime()}` : humanizedDateTime();
+    const finalPrefixedPrompt = typeof result.prompt === 'string' && result.prompt ? result.prompt : prefixedPrompt;
     const base64Image = await saveBase64AsFile(result.data, characterName, filename, result.format);
     callback
-        ? await callback(prompt, base64Image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, result.format)
-        : await sendMessage(prompt, base64Image, generationType, additionalNegativePrefix, initiator, prefixedPrompt, result.format);
+        ? await callback(prompt, base64Image, generationType, additionalNegativePrefix, initiator, finalPrefixedPrompt, result.format)
+        : await sendMessage(prompt, base64Image, generationType, additionalNegativePrefix, initiator, finalPrefixedPrompt, result.format);
     return base64Image;
 }
 
@@ -3624,6 +3634,7 @@ function getCivitaiGenerationBody(prompt, negativePrompt) {
         negative_prompt: negativePrompt,
         model: extension_settings.sd.civitai_model || extension_settings.sd.model,
         loras: extension_settings.sd.civitai_loras,
+        enhance_prompt: extension_settings.sd.civitai_enhance_prompt,
         allow_mature: extension_settings.sd.civitai_allow_mature,
         width: extension_settings.sd.width,
         height: extension_settings.sd.height,
@@ -3641,7 +3652,7 @@ function getCivitaiGenerationBody(prompt, negativePrompt) {
  * @param {string} prompt Positive prompt.
  * @param {string} negativePrompt Negative prompt.
  * @param {AbortSignal} signal Abort signal used to cancel the remote workflow.
- * @returns {Promise<{format: string, data: string}>}
+ * @returns {Promise<{format: string, data: string, prompt?: string}>}
  */
 async function generateCivitaiImage(prompt, negativePrompt, signal) {
     const submitResult = await fetch('/api/sd/civitai/generate', {
@@ -3706,7 +3717,15 @@ async function generateCivitaiImage(prompt, negativePrompt, signal) {
                 if (Number.isFinite(total)) {
                     $('#sd_civitai_cost').text(`${total} Buzz`);
                 }
-                return { format: workflow.format || 'png', data: workflow.image };
+                if (workflow?.enhancement?.prompt) {
+                    console.info('Civitai enhanced image prompt:', workflow.enhancement);
+                    toastr.success('Civitai enhanced the prompt before generation.', 'Image Generation');
+                }
+                return {
+                    format: workflow.format || 'png',
+                    data: workflow.image,
+                    prompt: workflow?.enhancement?.prompt || undefined,
+                };
             }
         }
     } finally {
@@ -6172,6 +6191,7 @@ export async function init() {
     $('#sd_civitai_search_button').on('click', onCivitaiSearchClick);
     $('#sd_civitai_resolve').on('click', onCivitaiResolveClick);
     $('#sd_civitai_loras').on('input', onCivitaiLorasInput);
+    $('#sd_civitai_enhance_prompt').on('input', onCivitaiEnhancePromptInput);
     $('#sd_civitai_allow_mature').on('input', onCivitaiMatureInput);
     $('#sd_civitai_preview').on('click', onCivitaiPreviewClick);
 

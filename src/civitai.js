@@ -196,6 +196,7 @@ export function flattenCivitaiModels(payload) {
  * @param {number} [params.clipSkip] CLIP skip.
  * @param {number} [params.seed] Seed.
  * @param {Record<string, number>} [params.loras] LoRA AIRs and strengths.
+ * @param {boolean} [params.enhancePrompt] Rewrite prompts with Civitai before generation.
  * @param {boolean} [params.allowMatureContent] Allow mature outputs.
  * @param {string} params.externalId Unique idempotency key.
  * @returns {object}
@@ -260,8 +261,33 @@ export function buildCivitaiWorkflow(params) {
         input.loras = params.loras;
     }
 
+    const imageStep = { $type: 'imageGen', input };
+    const steps = [imageStep];
+
+    if (params.enhancePrompt) {
+        const enhancementInput = {
+            ecosystem,
+            prompt: input.prompt,
+        };
+
+        if (input.negativePrompt) {
+            enhancementInput.negativePrompt = input.negativePrompt;
+        }
+
+        steps.unshift({
+            $type: 'promptEnhancement',
+            name: 'enhance',
+            input: enhancementInput,
+        });
+        imageStep.name = 'generate';
+        input.prompt = { $ref: 'enhance', path: 'output.enhancedPrompt' };
+        if (input.negativePrompt) {
+            input.negativePrompt = { $ref: 'enhance', path: 'output.enhancedNegativePrompt' };
+        }
+    }
+
     return {
-        steps: [{ $type: 'imageGen', input }],
+        steps,
         allowMatureContent: Boolean(params.allowMatureContent),
         tags: ['sillytavern', 'image-generation'],
         metadata: { client: 'SillyTavern', source: 'native-image-generation' },
@@ -284,6 +310,27 @@ export function getCivitaiWorkflowImage(workflow) {
         }
     }
     return null;
+}
+
+/**
+ * Extract prompt-enhancement output from a workflow.
+ * @param {unknown} workflow Civitai workflow.
+ * @returns {{prompt: string, negativePrompt: string, issues: unknown[], recommendations: string[]}|null}
+ */
+export function getCivitaiPromptEnhancement(workflow) {
+    const steps = Array.isArray(workflow?.steps) ? workflow.steps : [];
+    const step = steps.find(item => item?.$type === 'promptEnhancement' && item?.output);
+    const prompt = String(step?.output?.enhancedPrompt || '').trim();
+    if (!prompt) {
+        return null;
+    }
+
+    return {
+        prompt,
+        negativePrompt: String(step.output.enhancedNegativePrompt || '').trim(),
+        issues: Array.isArray(step.output.issues) ? step.output.issues : [],
+        recommendations: Array.isArray(step.output.recommendations) ? step.output.recommendations.map(String) : [],
+    };
 }
 
 /**

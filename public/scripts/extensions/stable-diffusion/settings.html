@@ -156,6 +156,13 @@
                 <textarea id="sd_civitai_loras" class="text_pole textarea_compact" rows="3" placeholder="One version ID, URL, or AIR per line&#10;Example: 123456 = 0.8"></textarea>
                 <small>Use <code>reference = strength</code>. Up to 10 compatible LoRAs are supported.</small>
 
+                <label for="sd_civitai_enhance_prompt" class="checkbox_label marginTop5">
+                    <input id="sd_civitai_enhance_prompt" type="checkbox" />
+                    <span>Enhance prompts with Civitai</span>
+                    <small class="toggle-description">Adds 1 Buzz per generation</small>
+                </label>
+                <small>Rewrites the final positive and negative prompts for the selected model family before generating. Cost preview includes this step.</small>
+
                 <label for="sd_civitai_allow_mature" class="checkbox_label marginTop5">
                     <input id="sd_civitai_allow_mature" type="checkbox" />
                     <span>Allow mature content</span>
