@@ -7198,7 +7198,7 @@ export async function init() {
     });
     $('#sd_civitai_trigger_words').on('input', onCivitaiTriggerWordsInput);
     $('#sd_civitai_prompt_mode').on('change', onCivitaiPromptModeInput);
-    $('#sd_civitai_quantity').on('input', onCivitaiQuantityInput);
+    $('#sd_civitai_quantity').on('change', onCivitaiQuantityInput);
     $('#sd_civitai_max_cost').on('input', onCivitaiMaxCostInput);
     $('#sd_civitai_source').on('change', onCivitaiSourceInput);
     $('#sd_civitai_source_upload').on('change', onCivitaiSourceUploadInput);
