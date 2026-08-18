@@ -64,6 +64,15 @@ import { oai_settings } from '../../openai.js';
 import { power_user } from '/scripts/power-user.js';
 import { MacrosParser } from '/scripts/macros.js';
 import { ActionLoaderHandle, loader } from '/scripts/action-loader.js';
+import {
+    applyComfyProfileSettings,
+    comfyProfileMatchesSettings,
+    createComfyProfile,
+    normalizeComfyProfileAssignments,
+    normalizeComfyProfiles,
+    renameComfyProfile,
+    updateComfyProfile,
+} from './comfy-profiles.js';
 
 export { MODULE_NAME };
 
@@ -77,6 +86,8 @@ let civitaiUploadedSourceName = '';
 let civitaiUploadedSourceUrl = '';
 let civitaiLoraSearchResults = [];
 let civitaiActiveWorkflowId = '';
+let comfyProfileApplyPromise = Promise.resolve();
+let comfyProfileUiBusy = false;
 
 const sources = {
     extras: 'extras',
@@ -357,6 +368,9 @@ const defaultSettings = {
     comfy_workflow: 'Default_Comfy_Workflow.json',
 
     comfy_runpod_url: '',
+    comfy_profiles: [],
+    comfy_profile_assignments: {},
+    comfy_profile_selected: '',
 
     // Pollinations settings
     pollinations_enhance: false,
@@ -533,6 +547,15 @@ async function loadSettings() {
         extension_settings.sd.character_negative_prompts = {};
     }
 
+    extension_settings.sd.comfy_profiles = normalizeComfyProfiles(extension_settings.sd.comfy_profiles);
+    extension_settings.sd.comfy_profile_assignments = normalizeComfyProfileAssignments(
+        extension_settings.sd.comfy_profile_assignments,
+        extension_settings.sd.comfy_profiles,
+    );
+    if (!extension_settings.sd.comfy_profiles.some(profile => profile.id === extension_settings.sd.comfy_profile_selected)) {
+        extension_settings.sd.comfy_profile_selected = '';
+    }
+
     if (!Array.isArray(extension_settings.sd.styles)) {
         extension_settings.sd.styles = defaultStyles;
     }
@@ -636,6 +659,7 @@ async function loadSettings() {
     registerFunctionTool();
 
     await loadSettingOptions();
+    renderComfyProfileControls();
 }
 
 /**
@@ -932,6 +956,11 @@ async function refinePrompt(prompt, args = null) {
 
 async function onChatChanged() {
     updateCivitaiResumeUi();
+    comfyProfileApplyPromise = applyAssignedComfyProfile().catch((error) => {
+        console.error('Could not apply the assigned ComfyUI profile.', error);
+    });
+    await comfyProfileApplyPromise;
+
     if (this_chid === undefined || selected_group) {
         $('#sd_character_prompt_block').hide();
         return;
@@ -1201,6 +1230,7 @@ async function onSourceChange() {
     toggleSourceControls();
     saveSettingsDebounced();
     await loadSettingOptions();
+    renderComfyProfileControls();
 }
 
 async function onComfyTypeChange() {
@@ -1380,6 +1410,317 @@ function onHFModelInput() {
 function onComfyWorkflowChange() {
     extension_settings.sd.comfy_workflow = $('#sd_comfy_workflow').find(':selected').val();
     saveSettingsDebounced();
+}
+
+function getCurrentComfyProfileCharacterKey() {
+    if (this_chid === undefined || selected_group) {
+        return '';
+    }
+
+    return getCharaFilename(this_chid) || '';
+}
+
+function getComfyProfile(profileId) {
+    return extension_settings.sd.comfy_profiles.find(profile => profile.id === profileId);
+}
+
+function getSelectedComfyProfileId() {
+    const characterKey = getCurrentComfyProfileCharacterKey();
+    const assignedProfileId = characterKey ? extension_settings.sd.comfy_profile_assignments[characterKey] : '';
+    return assignedProfileId || extension_settings.sd.comfy_profile_selected || '';
+}
+
+function isComfyProfileNameTaken(name, exceptProfileId = '') {
+    const normalizedName = String(name || '').trim().toLocaleLowerCase();
+    return extension_settings.sd.comfy_profiles.some(profile => profile.id !== exceptProfileId && profile.name.toLocaleLowerCase() === normalizedName);
+}
+
+function renderComfyProfileControls() {
+    const select = $('#sd_comfy_profile');
+    if (!select.length) {
+        return;
+    }
+
+    const profiles = extension_settings.sd.comfy_profiles;
+    const characterKey = getCurrentComfyProfileCharacterKey();
+    const assignedProfileId = characterKey ? extension_settings.sd.comfy_profile_assignments[characterKey] : '';
+    let selectedProfileId = getSelectedComfyProfileId();
+    if (!profiles.some(profile => profile.id === selectedProfileId)) {
+        selectedProfileId = '';
+    }
+
+    select.empty().append(new Option('Current settings (no profile)', ''));
+    for (const profile of profiles) {
+        select.append(new Option(profile.name, profile.id, false, profile.id === selectedProfileId));
+    }
+    select.val(selectedProfileId);
+
+    const hasSelectedProfile = Boolean(selectedProfileId);
+    $('#sd_comfy_profile_apply, #sd_comfy_profile_save, #sd_comfy_profile_rename, #sd_comfy_profile_delete').toggleClass('disabled', !hasSelectedProfile);
+    $('#sd_comfy_profile_character_row').toggle(Boolean(characterKey));
+    $('#sd_comfy_profile_character').prop('checked', Boolean(characterKey && assignedProfileId));
+
+    if (characterKey) {
+        const characterName = getContext()?.characters?.[this_chid]?.name || characterKey;
+        const assignedProfile = getComfyProfile(assignedProfileId);
+        $('#sd_comfy_profile_assignment_status').text(assignedProfile
+            ? `${assignedProfile.name} is automatically used for ${characterName}.`
+            : `No automatic profile is assigned to ${characterName}.`);
+    } else if (selected_group) {
+        $('#sd_comfy_profile_assignment_status').text('Character assignment is unavailable in group chats.');
+    } else {
+        $('#sd_comfy_profile_assignment_status').text('Open a character chat to assign a profile automatically.');
+    }
+
+    updateComfyProfileStatus();
+}
+
+function updateComfyProfileStatus() {
+    if (comfyProfileUiBusy) {
+        return;
+    }
+
+    const profileId = String($('#sd_comfy_profile').val() || '');
+    const profile = getComfyProfile(profileId);
+    if (!profile) {
+        $('#sd_comfy_profile_status').text('Save the current ComfyUI controls as a new profile.');
+        return;
+    }
+
+    $('#sd_comfy_profile_status').text(comfyProfileMatchesSettings(profile, extension_settings.sd)
+        ? 'This profile matches the current controls.'
+        : 'Current controls have unsaved changes. Use Save to update the profile.');
+}
+
+function setComfyProfileSelectValue(selector, value) {
+    const select = $(selector);
+    if (!select.length) {
+        return;
+    }
+
+    const stringValue = String(value ?? '');
+    const hasOption = Array.from(select[0].options).some(option => option.value === stringValue);
+    if (stringValue && !hasOption) {
+        select.append(new Option(`${stringValue} (unavailable)`, stringValue));
+    }
+    select.val(stringValue);
+}
+
+async function syncComfyProfileControls() {
+    $('#sd_source').val(sources.comfy);
+    $('#sd_comfy_type').val(extension_settings.sd.comfy_type);
+    setComfyProfileSelectValue('#sd_comfy_workflow', extension_settings.sd.comfy_workflow);
+    setComfyProfileSelectValue('#sd_model', extension_settings.sd.model);
+    setComfyProfileSelectValue('#sd_vae', extension_settings.sd.vae);
+    setComfyProfileSelectValue('#sd_sampler', extension_settings.sd.sampler);
+    setComfyProfileSelectValue('#sd_scheduler', extension_settings.sd.scheduler);
+    $('#sd_steps').val(extension_settings.sd.steps);
+    $('#sd_steps_value').val(extension_settings.sd.steps);
+    $('#sd_scale').val(extension_settings.sd.scale);
+    $('#sd_scale_value').val(Number(extension_settings.sd.scale).toFixed(1));
+    $('#sd_width').val(extension_settings.sd.width);
+    $('#sd_width_value').val(extension_settings.sd.width);
+    $('#sd_height').val(extension_settings.sd.height);
+    $('#sd_height_value').val(extension_settings.sd.height);
+    $('#sd_resolution').val(getClosestKnownResolution());
+    $('#sd_seed').val(extension_settings.sd.seed);
+    $('#sd_clip_skip').val(extension_settings.sd.clip_skip);
+    $('#sd_clip_skip_value').val(extension_settings.sd.clip_skip);
+    $('#sd_denoising_strength').val(extension_settings.sd.denoising_strength);
+    $('#sd_denoising_strength_value').val(Number(extension_settings.sd.denoising_strength).toFixed(2));
+    $('#sd_prompt_prefix').val(extension_settings.sd.prompt_prefix);
+    $('#sd_negative_prompt').val(extension_settings.sd.negative_prompt);
+    await adjustElementScrollHeight();
+}
+
+async function applyComfyProfile(profileId, { silent = false } = {}) {
+    const profile = getComfyProfile(profileId);
+    if (!profile) {
+        return false;
+    }
+
+    comfyProfileUiBusy = true;
+    try {
+        applyComfyProfileSettings(extension_settings.sd, profile);
+        extension_settings.sd.comfy_profile_selected = profile.id;
+        $('#sd_source').val(sources.comfy);
+        $('#sd_comfy_type').val(extension_settings.sd.comfy_type);
+        toggleSourceControls();
+        await loadSettingOptions();
+        await syncComfyProfileControls();
+        saveSettingsDebounced();
+        if (!silent) {
+            toastr.success(`Loaded ComfyUI profile: ${profile.name}`);
+        }
+        return true;
+    } catch (error) {
+        console.error(error);
+        toastr.error(`Could not load ComfyUI profile: ${error.message}`);
+        return false;
+    } finally {
+        comfyProfileUiBusy = false;
+        renderComfyProfileControls();
+    }
+}
+
+async function applyAssignedComfyProfile() {
+    const characterKey = getCurrentComfyProfileCharacterKey();
+    const profileId = characterKey ? extension_settings.sd.comfy_profile_assignments[characterKey] : '';
+    if (!profileId) {
+        renderComfyProfileControls();
+        return;
+    }
+
+    extension_settings.sd.comfy_profile_selected = profileId;
+    await applyComfyProfile(profileId, { silent: true });
+}
+
+async function onComfyProfileChange() {
+    const profileId = String($('#sd_comfy_profile').val() || '');
+    const characterKey = getCurrentComfyProfileCharacterKey();
+    const wasAssigned = Boolean(characterKey && extension_settings.sd.comfy_profile_assignments[characterKey]);
+    extension_settings.sd.comfy_profile_selected = profileId;
+
+    if (characterKey && wasAssigned) {
+        if (profileId) {
+            extension_settings.sd.comfy_profile_assignments[characterKey] = profileId;
+        } else {
+            delete extension_settings.sd.comfy_profile_assignments[characterKey];
+        }
+    }
+
+    saveSettingsDebounced();
+    if (profileId) {
+        await applyComfyProfile(profileId);
+    } else {
+        renderComfyProfileControls();
+    }
+}
+
+async function onComfyProfileApplyClick() {
+    const profileId = String($('#sd_comfy_profile').val() || '');
+    if (profileId) {
+        await applyComfyProfile(profileId);
+    }
+}
+
+async function onComfyProfileNewClick() {
+    if (extension_settings.sd.source !== sources.comfy) {
+        toastr.warning('Select ComfyUI before creating a ComfyUI profile.');
+        return;
+    }
+
+    const characterName = getCurrentComfyProfileCharacterKey()
+        ? (getContext()?.characters?.[this_chid]?.name || 'Character')
+        : 'ComfyUI';
+    const name = await callGenericPopup(t`Enter a name for the new ComfyUI profile:`, POPUP_TYPE.INPUT, `${characterName} profile`);
+    if (!name) {
+        return;
+    }
+    if (isComfyProfileNameTaken(name)) {
+        toastr.warning('A ComfyUI profile with that name already exists.');
+        return;
+    }
+
+    const profile = createComfyProfile(name, extension_settings.sd);
+    extension_settings.sd.comfy_profiles.push(profile);
+    extension_settings.sd.comfy_profile_selected = profile.id;
+    const characterKey = getCurrentComfyProfileCharacterKey();
+    if (characterKey) {
+        extension_settings.sd.comfy_profile_assignments[characterKey] = profile.id;
+    }
+    saveSettingsDebounced();
+    renderComfyProfileControls();
+    toastr.success(characterKey
+        ? `Saved and assigned ComfyUI profile: ${profile.name}`
+        : `Saved ComfyUI profile: ${profile.name}`);
+}
+
+function onComfyProfileSaveClick() {
+    const profileId = String($('#sd_comfy_profile').val() || '');
+    const index = extension_settings.sd.comfy_profiles.findIndex(profile => profile.id === profileId);
+    if (index === -1) {
+        return;
+    }
+
+    const profile = updateComfyProfile(extension_settings.sd.comfy_profiles[index], extension_settings.sd);
+    extension_settings.sd.comfy_profiles[index] = profile;
+    saveSettingsDebounced();
+    renderComfyProfileControls();
+    toastr.success(`Updated ComfyUI profile: ${profile.name}`);
+}
+
+async function onComfyProfileRenameClick() {
+    const profileId = String($('#sd_comfy_profile').val() || '');
+    const index = extension_settings.sd.comfy_profiles.findIndex(profile => profile.id === profileId);
+    if (index === -1) {
+        return;
+    }
+
+    const currentProfile = extension_settings.sd.comfy_profiles[index];
+    const name = await callGenericPopup(t`Enter a new name for this ComfyUI profile:`, POPUP_TYPE.INPUT, currentProfile.name);
+    if (!name) {
+        return;
+    }
+    if (isComfyProfileNameTaken(name, profileId)) {
+        toastr.warning('A ComfyUI profile with that name already exists.');
+        return;
+    }
+
+    extension_settings.sd.comfy_profiles[index] = renameComfyProfile(currentProfile, name);
+    saveSettingsDebounced();
+    renderComfyProfileControls();
+}
+
+async function onComfyProfileDeleteClick() {
+    const profileId = String($('#sd_comfy_profile').val() || '');
+    const profile = getComfyProfile(profileId);
+    if (!profile) {
+        return;
+    }
+
+    const confirmed = await callGenericPopup(
+        t`Delete the ComfyUI profile "${profile.name}"? Character assignments using it will also be removed.`,
+        POPUP_TYPE.CONFIRM,
+        '',
+        { okButton: t`Delete`, cancelButton: t`Cancel` },
+    );
+    if (!confirmed) {
+        return;
+    }
+
+    extension_settings.sd.comfy_profiles = extension_settings.sd.comfy_profiles.filter(item => item.id !== profileId);
+    extension_settings.sd.comfy_profile_assignments = Object.fromEntries(
+        Object.entries(extension_settings.sd.comfy_profile_assignments).filter(([, assignedProfileId]) => assignedProfileId !== profileId),
+    );
+    extension_settings.sd.comfy_profile_selected = '';
+    saveSettingsDebounced();
+    renderComfyProfileControls();
+}
+
+async function onComfyProfileCharacterInput() {
+    const characterKey = getCurrentComfyProfileCharacterKey();
+    if (!characterKey) {
+        return;
+    }
+
+    const shouldAssign = Boolean($('#sd_comfy_profile_character').prop('checked'));
+    const profileId = String($('#sd_comfy_profile').val() || '');
+    if (shouldAssign && !profileId) {
+        $('#sd_comfy_profile_character').prop('checked', false);
+        toastr.warning('Select or create a ComfyUI profile first.');
+        return;
+    }
+
+    if (shouldAssign) {
+        extension_settings.sd.comfy_profile_assignments[characterKey] = profileId;
+        extension_settings.sd.comfy_profile_selected = profileId;
+        await applyComfyProfile(profileId, { silent: true });
+    } else {
+        delete extension_settings.sd.comfy_profile_assignments[characterKey];
+    }
+    saveSettingsDebounced();
+    renderComfyProfileControls();
 }
 
 function onBflUpsamplingInput() {
@@ -3471,6 +3812,8 @@ async function generatePicture(initiator, args, trigger, message, callback) {
         console.log('Trigger word empty, aborting');
         return;
     }
+
+    await comfyProfileApplyPromise;
 
     if (!isValidState()) {
         toastr.warning('Image generation is not available. Check your settings and try again.');
@@ -5890,6 +6233,7 @@ async function onComfyOpenWorkflowEditorClick() {
             el.attr('data-placeholder', `${this.value}`);
             checkPlaceholders();
             saveSettingsDebounced();
+            updateComfyProfileStatus();
         });
         el.find('.sd_comfy_workflow_editor_custom_replace').val(placeholder.replace);
         el.find('.sd_comfy_workflow_editor_custom_replace').on('input', function () {
@@ -5898,11 +6242,13 @@ async function onComfyOpenWorkflowEditorClick() {
             }
             placeholder.replace = this.value;
             saveSettingsDebounced();
+            updateComfyProfileStatus();
         });
         el.find('.sd_comfy_workflow_editor_custom_remove').on('click', () => {
             el.remove();
             extension_settings.sd.comfy_placeholders.splice(extension_settings.sd.comfy_placeholders.indexOf(placeholder));
             saveSettingsDebounced();
+            updateComfyProfileStatus();
         });
     };
     $('#sd_comfy_workflow_editor_placeholder_add').on('click', () => {
@@ -5916,6 +6262,7 @@ async function onComfyOpenWorkflowEditorClick() {
         extension_settings.sd.comfy_placeholders.push(placeholder);
         addPlaceholderDom(placeholder);
         saveSettingsDebounced();
+        updateComfyProfileStatus();
     });
     (extension_settings.sd.comfy_placeholders ?? []).forEach(placeholder => {
         addPlaceholderDom(placeholder);
@@ -7151,6 +7498,15 @@ export async function init() {
     $('#sd_comfy_url').on('input', onComfyUrlInput);
     $('#sd_comfy_runpod_url').on('input', onComfyRunPodUrlInput);
     $('#sd_comfy_workflow').on('change', onComfyWorkflowChange);
+    $('#sd_comfy_profile').on('change', onComfyProfileChange);
+    $('#sd_comfy_profile_new').on('click', onComfyProfileNewClick);
+    $('#sd_comfy_profile_apply').on('click', onComfyProfileApplyClick);
+    $('#sd_comfy_profile_save').on('click', onComfyProfileSaveClick);
+    $('#sd_comfy_profile_rename').on('click', onComfyProfileRenameClick);
+    $('#sd_comfy_profile_delete').on('click', onComfyProfileDeleteClick);
+    $('#sd_comfy_profile_character').on('input', onComfyProfileCharacterInput);
+    $('#sd_model, #sd_vae, #sd_sampler, #sd_scheduler, #sd_steps, #sd_scale, #sd_width, #sd_height, #sd_seed, #sd_clip_skip, #sd_denoising_strength, #sd_prompt_prefix, #sd_negative_prompt, #sd_comfy_type, #sd_comfy_workflow')
+        .on('input change', updateComfyProfileStatus);
     $('#sd_comfy_open_workflow_editor').on('click', onComfyOpenWorkflowEditorClick);
     $('#sd_comfy_new_workflow').on('click', onComfyNewWorkflowClick);
     $('#sd_comfy_rename_workflow').on('click', onComfyRenameWorkflowClick);
@@ -7281,6 +7637,7 @@ export async function init() {
     });
 
     await loadSettings();
+    await onChatChanged();
     getContext().chat?.forEach((_, messageId) => addCivitaiMediaActions(messageId));
     $('body').addClass('sd');
 

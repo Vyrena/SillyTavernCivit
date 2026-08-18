@@ -401,6 +401,35 @@
                         <i class="fa-solid fa-trash-can"></i>
                     </div>
                 </div>
+                <label for="sd_comfy_profile">ComfyUI Generation Profile</label>
+                <div class="sd_comfy_profile_controls flex-container">
+                    <select id="sd_comfy_profile" class="flex1 text_pole"></select>
+                    <div id="sd_comfy_profile_new" class="menu_button menu_button_icon" title="Save current controls as a new profile">
+                        <i class="fa-solid fa-plus"></i>
+                        <span>New</span>
+                    </div>
+                    <div id="sd_comfy_profile_apply" class="menu_button menu_button_icon" title="Reload the selected profile">
+                        <i class="fa-solid fa-play"></i>
+                        <span>Apply</span>
+                    </div>
+                    <div id="sd_comfy_profile_save" class="menu_button menu_button_icon" title="Update the selected profile from the current controls">
+                        <i class="fa-solid fa-floppy-disk"></i>
+                        <span>Save</span>
+                    </div>
+                    <div id="sd_comfy_profile_rename" class="menu_button menu_button_icon" title="Rename the selected profile">
+                        <i class="fa-solid fa-pencil"></i>
+                    </div>
+                    <div id="sd_comfy_profile_delete" class="menu_button menu_button_icon" title="Delete the selected profile">
+                        <i class="fa-solid fa-trash-can"></i>
+                    </div>
+                </div>
+                <small>Profiles store workflow, model/VAE, sampler, scheduler, steps, CFG, dimensions, seed, CLIP skip, denoise, prompt prefixes, and custom placeholders. Server URLs and API keys stay global.</small>
+                <small id="sd_comfy_profile_status">Save the current ComfyUI controls as a new profile.</small>
+                <label id="sd_comfy_profile_character_row" for="sd_comfy_profile_character" class="checkbox_label flexWrap marginTop5">
+                    <input id="sd_comfy_profile_character" type="checkbox" />
+                    <span>Automatically use this profile for the current character</span>
+                </label>
+                <small id="sd_comfy_profile_assignment_status">No automatic character profile is assigned.</small>
             </div>
             <div data-sd-source="pollinations">
                 <a href="https://enter.pollinations.ai">Pollinations.ai</a>
@@ -677,7 +706,7 @@
                 </div>
             </div>
 
-            <div class="flex-container marginTopBot5" data-sd-source="novel">
+            <div class="flex-container marginTopBot5" data-sd-source="novel,comfy">
                 <label class="flex1 checkbox_label" data-i18n="[title]SMEA versions of samplers are modified to perform better at high resolution." title="SMEA versions of samplers are modified to perform better at high resolution.">
                     <input id="sd_novel_sm" type="checkbox" />
                     <small data-i18n="SMEA">SMEA</small>
