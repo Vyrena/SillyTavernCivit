@@ -65,6 +65,7 @@ import {
     getWebTokenizer,
 } from '../tokenizers.js';
 import { getVertexAIAuth, getProjectIdFromServiceAccount } from '../google.js';
+import { resolveOpenRouterQuietPromptProcessing } from '../../openrouter-compatibility.js';
 
 const API_OPENAI = 'https://api.openai.com/v1';
 const API_CLAUDE = 'https://api.anthropic.com/v1';
@@ -2158,9 +2159,9 @@ router.post('/generate', async function (request, response) {
     try {
         if (!request.body) return response.status(400).send({ error: true });
 
-        const postProcessingType = request.body.custom_prompt_post_processing;
+        const postProcessingType = resolveOpenRouterQuietPromptProcessing(request.body);
         if (Array.isArray(request.body.messages) && postProcessingType) {
-            console.info('Applying custom prompt post-processing of type', postProcessingType);
+            console.info('Applying prompt post-processing of type', postProcessingType);
             request.body.messages = postProcessPrompt(
                 request.body.messages,
                 postProcessingType,
