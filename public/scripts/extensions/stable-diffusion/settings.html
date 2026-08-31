@@ -770,6 +770,78 @@
                     </small>
                 </label>
             </div>
+            <div id="sd_appearance_continuity" class="inline-drawer marginTopBot5">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b>Appearance Continuity</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <small class="flexBasis100p">
+                        Keeps subject appearance notes inside this chat. This memory is available in direct and group chats and is not saved to character cards.
+                        Continuity generations use the common style prefixes plus this memory, not the card-specific character prefix, so scenario cards can manage several independent subjects.
+                    </small>
+                    <small id="sd_appearance_continuity_status" class="sd_appearance_continuity_status" role="status" aria-live="polite">
+                        Not initialized. Choosing the continuity generation mode will enable it for this chat.
+                    </small>
+                    <div class="sd_appearance_continuity_options flex-container flexFlowColumn marginTop5">
+                        <label for="sd_appearance_continuity_enabled" class="checkbox_label flexWrap">
+                            <input id="sd_appearance_continuity_enabled" type="checkbox" />
+                            <span>Enable appearance continuity for this chat</span>
+                        </label>
+                        <label for="sd_appearance_continuity_auto_create" class="checkbox_label flexWrap">
+                            <input id="sd_appearance_continuity_auto_create" type="checkbox" />
+                            <span>Automatically remember new subjects</span>
+                        </label>
+                    </div>
+                    <div class="marginTop5">
+                        <div class="flex-container alignItemsCenter">
+                            <strong class="flex1">Remembered subjects</strong>
+                            <small id="sd_appearance_continuity_entity_count">0 subjects</small>
+                        </div>
+                        <div
+                            id="sd_appearance_continuity_entities"
+                            class="sd_appearance_continuity_entities"
+                            role="listbox"
+                            aria-label="Remembered appearance subjects"
+                            aria-describedby="sd_appearance_continuity_status"
+                        >
+                            <small class="sd_appearance_continuity_empty" role="presentation">No subjects remembered for this chat.</small>
+                        </div>
+                    </div>
+                    <div id="sd_appearance_continuity_actions" class="sd_appearance_continuity_actions flex-container flexWrap marginTop5">
+                        <button
+                            id="sd_appearance_continuity_edit"
+                            type="button"
+                            class="menu_button menu_button_icon"
+                            aria-controls="sd_appearance_continuity_entities"
+                            disabled
+                        >
+                            <i class="fa-solid fa-pen-to-square"></i>
+                            <span>Edit selected</span>
+                        </button>
+                        <button
+                            id="sd_appearance_continuity_forget"
+                            type="button"
+                            class="menu_button menu_button_icon"
+                            aria-controls="sd_appearance_continuity_entities"
+                            disabled
+                        >
+                            <i class="fa-solid fa-user-minus"></i>
+                            <span>Forget selected</span>
+                        </button>
+                        <button
+                            id="sd_appearance_continuity_clear"
+                            type="button"
+                            class="menu_button menu_button_icon"
+                            aria-controls="sd_appearance_continuity_entities"
+                            disabled
+                        >
+                            <i class="fa-solid fa-trash-can"></i>
+                            <span>Clear chat memory</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
             <hr>
             <h4 data-i18n="Chat Message Visibility (by source)">
                 Chat Message Visibility (by source)

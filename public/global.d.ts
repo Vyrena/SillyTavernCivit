@@ -141,8 +141,36 @@ declare global {
         negative?: string;
         width?: number;
         height?: number;
+        /** Chat-local appearance continuity state used to create this media attachment. */
+        appearance_memory?: AppearanceMemorySnapshot;
         /** Replay-safe metadata for images generated through Civitai. */
         civitai?: CivitaiGenerationMetadata;
+    }
+
+    interface AppearanceMemorySnapshot {
+        version: 1;
+        memoryRevision: number;
+        scenePrompt: string;
+        subjects: AppearanceMemorySubjectSnapshot[];
+        positiveSnapshot: string;
+        negativeSnapshot: string;
+    }
+
+    interface AppearanceMemorySubjectSnapshot {
+        /** Null when the generated subject could not be resolved to a stable chat entity. */
+        entityId: string | null;
+        displayName: string;
+        canonicalTags: string[];
+        persistentTags: string[];
+        negativeTags: string[];
+        sceneState: AppearanceMemorySceneStateSnapshot;
+    }
+
+    interface AppearanceMemorySceneStateSnapshot {
+        pose: string[];
+        action: string[];
+        expression: string[];
+        transient: string[];
     }
 
     interface CivitaiGenerationMetadata {
