@@ -44,12 +44,13 @@ const SUBJECT_KEYS = Object.freeze([
 ]);
 const CHANGE_KEYS = Object.freeze(['add', 'remove']);
 const SCENE_STATE_KEYS = Object.freeze(['pose', 'action', 'expression', 'transient']);
+const PROFILE_KEYS = Object.freeze(['displayName', 'canonicalTags', 'negativeTags', 'persistentTags']);
 const RESERVED_PROMPT_CONTROL_PATTERNS = Object.freeze([
     { label: 'extra-network', pattern: /<\s*(?:lora|lyco|hypernet|embedding)\s*:/iu },
     { label: 'model-reference', pattern: /\b(?:lora|lyco|hypernet|embedding)\s*:/iu },
     { label: 'wildcard', pattern: /__[^\r\n]+?__/u },
     { label: 'macro', pattern: /\{\{|\}\}|\$\{|\{[A-Za-z_][A-Za-z0-9_.-]*\}|\{[^{}\r\n]*\|[^{}\r\n]*\}|%[A-Za-z_][A-Za-z0-9_.-]*%/u },
-    { label: 'weighted-prompt', pattern: /\([^()\r\n]+\)|\[[^\[\]\r\n]+\]/u },
+    { label: 'weighted-prompt', pattern: /\([^()\r\n]+\)|\[[^[\]\r\n]+\]/u },
     { label: 'prompt-composition', pattern: /^(?:BREAK|AND|AND_PERP)$/u },
 ]);
 
@@ -534,6 +535,25 @@ export function validateAppearanceExtraction(value, options = {}) {
 }
 
 /**
+ * Strictly validates a complete user-reviewable appearance profile.
+ * @param {unknown} value Profile candidate from text, vision, or an editable preview.
+ * @returns {{displayName: string, canonicalTags: string[], negativeTags: string[], persistentTags: string[]}}
+ */
+export function validateAppearanceProfile(value) {
+    assertExactKeys(value, PROFILE_KEYS, 'profile');
+    const profile = {
+        displayName: validateStrictString(value.displayName, 'profile.displayName', APPEARANCE_MEMORY_LIMITS.maxNameLength),
+        canonicalTags: validateStrictStringList(value.canonicalTags, 'profile.canonicalTags'),
+        negativeTags: validateStrictStringList(value.negativeTags, 'profile.negativeTags'),
+        persistentTags: validateStrictStringList(value.persistentTags, 'profile.persistentTags'),
+    };
+    if (!profile.canonicalTags.length) {
+        throw new TypeError('profile.canonicalTags must include at least one stable visual trait.');
+    }
+    return profile;
+}
+
+/**
  * Merges validated extraction proposals into chat-local memory.
  *
  * Existing canonical/negative tags are authoritative: LLM observations for existing IDs are
@@ -751,6 +771,80 @@ export function mergeAppearanceExtraction(memory, extraction, options = {}) {
     });
 
     return { memory: prunedMemory, resolutions, proposals };
+}
+
+/**
+ * Creates or replaces one complete appearance profile after explicit user review.
+ * @param {unknown} memory Current chat-local memory.
+ * @param {unknown} profile Complete validated replacement profile.
+ * @param {object} [options] Upsert controls.
+ * @param {string|null} [options.entityId] Existing entity to replace; null creates a new entity.
+ * @param {() => string} [options.createEntityId] Caller-owned ID factory for a new entity.
+ * @param {number} [options.messageId] Monotonic appearance sequence for recency.
+ * @param {number} [options.maxEntities] Entity cap after the update.
+ * @returns {{memory: object, entity: object}}
+ */
+export function upsertAppearanceProfile(memory, profile, options = {}) {
+    const normalizedMemory = normalizeAppearanceMemory(memory, { maxEntities: APPEARANCE_MEMORY_LIMITS.maxStoredEntities });
+    const validated = validateAppearanceProfile(profile);
+    const entities = Object.fromEntries(Object.entries(normalizedMemory.entities).map(([id, entity]) => [id, cloneEntity(entity)]));
+    const messageId = toNonNegativeInteger(options.messageId);
+    let entityId = options.entityId ?? null;
+
+    if (entityId !== null) {
+        if (!isValidEntityId(entityId) || !Object.hasOwn(entities, entityId)) {
+            throw new TypeError('options.entityId does not identify an existing appearance entity.');
+        }
+        const entity = entities[entityId];
+        const previousName = entity.displayName;
+        entity.displayName = validated.displayName;
+        entity.aliases = uniqueStrings([
+            ...entity.aliases,
+            previousName,
+        ].map(value => normalizePromptText(value, APPEARANCE_MEMORY_LIMITS.maxNameLength)).filter(Boolean))
+            .filter(value => value.toLowerCase() !== entity.displayName.toLowerCase())
+            .slice(0, APPEARANCE_MEMORY_LIMITS.maxAliases);
+        entity.canonicalTags = [...validated.canonicalTags];
+        entity.negativeTags = [...validated.negativeTags];
+        entity.persistentTags = [...validated.persistentTags];
+        entity.lastSeenMessage = messageId === null ? entity.lastSeenMessage : Math.max(entity.lastSeenMessage ?? -1, messageId);
+        entity.status = 'active';
+        entity.revision += 1;
+    } else {
+        if (typeof options.createEntityId !== 'function') {
+            throw new TypeError('options.createEntityId is required to create an appearance profile.');
+        }
+        entityId = options.createEntityId();
+        if (!isValidEntityId(entityId) || Object.hasOwn(entities, entityId)) {
+            throw new TypeError('options.createEntityId returned an invalid or duplicate entity ID.');
+        }
+        entities[entityId] = {
+            id: entityId,
+            displayName: validated.displayName,
+            aliases: [],
+            canonicalTags: [...validated.canonicalTags],
+            persistentTags: [...validated.persistentTags],
+            negativeTags: [...validated.negativeTags],
+            createdMessage: messageId,
+            lastSeenMessage: messageId,
+            status: 'active',
+            revision: 1,
+        };
+    }
+
+    const updatedMemory = pruneAppearanceMemory({
+        ...normalizedMemory,
+        revision: normalizedMemory.revision + 1,
+        entities,
+    }, {
+        maxEntities: options.maxEntities,
+        currentMessage: messageId,
+    });
+    const entity = updatedMemory.entities[entityId];
+    if (!entity) {
+        throw new Error('The saved appearance profile was removed by the memory limit.');
+    }
+    return { memory: updatedMemory, entity: cloneEntity(entity) };
 }
 
 /**

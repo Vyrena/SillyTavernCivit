@@ -779,6 +779,7 @@
                     <small class="flexBasis100p">
                         Keeps subject appearance notes inside this chat. This memory is available in direct and group chats and is not saved to character cards.
                         Continuity generations use the common style prefixes plus this memory, not the card-specific character prefix, so scenario cards can manage several independent subjects.
+                        Select a subject before refreshing it, or leave the selection empty to create a new named subject. Every generated or captured profile is shown for editing before it is saved.
                     </small>
                     <small id="sd_appearance_continuity_status" class="sd_appearance_continuity_status" role="status" aria-live="polite">
                         Not initialized. Choosing the continuity generation mode will enable it for this chat.
@@ -809,6 +810,26 @@
                         </div>
                     </div>
                     <div id="sd_appearance_continuity_actions" class="sd_appearance_continuity_actions flex-container flexWrap marginTop5">
+                        <button
+                            id="sd_appearance_continuity_generate"
+                            type="button"
+                            class="menu_button menu_button_icon"
+                            aria-controls="sd_appearance_continuity_entities"
+                            title="Create or refresh an appearance from chat and scenario text"
+                        >
+                            <i class="fa-solid fa-wand-magic-sparkles"></i>
+                            <span>Generate / refresh</span>
+                        </button>
+                        <button
+                            id="sd_appearance_continuity_capture"
+                            type="button"
+                            class="menu_button menu_button_icon"
+                            aria-controls="sd_appearance_continuity_entities"
+                            title="Capture an appearance from the current generated image or character avatar"
+                        >
+                            <i class="fa-solid fa-camera"></i>
+                            <span>Capture from image</span>
+                        </button>
                         <button
                             id="sd_appearance_continuity_edit"
                             type="button"

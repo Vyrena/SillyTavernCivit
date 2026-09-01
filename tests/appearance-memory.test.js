@@ -11,6 +11,8 @@ import {
     pruneAppearanceMemory,
     replayAppearanceSnapshot,
     validateAppearanceExtraction,
+    validateAppearanceProfile,
+    upsertAppearanceProfile,
 } from '../public/scripts/extensions/stable-diffusion/appearance-memory.js';
 
 function makeSubject(overrides = {}) {
@@ -101,6 +103,78 @@ describe('chat-local appearance memory', () => {
                 },
             },
         });
+    });
+
+    test('strictly validates complete text or image appearance profiles', () => {
+        const profile = {
+            displayName: 'Mira',
+            canonicalTags: ['adult woman', 'long black hair', 'amber eyes'],
+            negativeTags: ['short hair'],
+            persistentTags: ['green apron'],
+        };
+
+        expect(validateAppearanceProfile(profile)).toEqual(profile);
+        expect(validateAppearanceProfile(profile)).not.toBe(profile);
+        expect(() => validateAppearanceProfile({ ...profile, source: 'avatar' })).toThrow(/exactly/);
+        expect(() => validateAppearanceProfile({ ...profile, canonicalTags: [] })).toThrow(/stable visual trait/);
+        expect(() => validateAppearanceProfile({ ...profile, canonicalTags: ['<lora:portrait:1>'] })).toThrow(/prompt-control/);
+        expect(() => validateAppearanceProfile({ ...profile, persistentTags: ['{{outfit}}'] })).toThrow(/prompt-control/);
+    });
+
+    test('explicit profile upserts replace only the reviewed subject and preserve prior names as aliases', () => {
+        const original = {
+            ...createEmptyAppearanceMemory(),
+            revision: 7,
+            entities: {
+                'e:mira': makeEntity('e:mira'),
+                'e:other': makeEntity('e:other', { displayName: 'Niko', canonicalTags: ['adult man'] }),
+            },
+        };
+        const replacement = {
+            displayName: 'Mira Vale',
+            canonicalTags: ['adult woman', 'short silver hair', 'green eyes'],
+            negativeTags: ['black hair'],
+            persistentTags: ['red coat'],
+        };
+        const updated = upsertAppearanceProfile(original, replacement, { entityId: 'e:mira', messageId: 12 });
+
+        expect(updated.entity).toMatchObject({
+            id: 'e:mira',
+            displayName: 'Mira Vale',
+            aliases: ['the bartender', 'Mira'],
+            canonicalTags: replacement.canonicalTags,
+            negativeTags: replacement.negativeTags,
+            persistentTags: replacement.persistentTags,
+            lastSeenMessage: 12,
+            status: 'active',
+            revision: 2,
+        });
+        expect(updated.memory.revision).toBe(8);
+        expect(updated.memory.entities['e:other']).toEqual(normalizeAppearanceMemory(original).entities['e:other']);
+        expect(original.entities['e:mira'].displayName).toBe('Mira');
+    });
+
+    test('explicit profile upserts create caller-identified chat-local subjects safely', () => {
+        const profile = {
+            displayName: 'The courier',
+            canonicalTags: ['young adult woman', 'freckled face', 'copper braid'],
+            negativeTags: ['black hair'],
+            persistentTags: ['weathered leather satchel'],
+        };
+        const created = upsertAppearanceProfile(createEmptyAppearanceMemory(), profile, {
+            createEntityId: () => 'subject-courier',
+            messageId: 3,
+        });
+
+        expect(created.entity).toMatchObject({
+            id: 'subject-courier',
+            ...profile,
+            createdMessage: 3,
+            lastSeenMessage: 3,
+            revision: 1,
+        });
+        expect(created.memory.revision).toBe(1);
+        expect(() => upsertAppearanceProfile(created.memory, profile, { entityId: 'subject-missing' })).toThrow(/existing/);
     });
 
     test('strictly rejects unknown fields, excessive output, and invalid references', () => {

@@ -81,6 +81,35 @@
     gap: 5px;
 }
 
+.sd_appearance_profile_review,
+.sd_appearance_capture_sources {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    text-align: left;
+}
+
+.sd_appearance_profile_review label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.sd_appearance_capture_source {
+    display: grid;
+    grid-template-columns: minmax(72px, 120px) 1fr;
+    gap: 10px;
+    align-items: center;
+}
+
+.sd_appearance_capture_source img {
+    width: 100%;
+    max-height: 120px;
+    border-radius: 6px;
+    object-fit: contain;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 15%, transparent);
+}
+
 #sd_comfy_workflow_editor_template {
     height: 100%;
 }
